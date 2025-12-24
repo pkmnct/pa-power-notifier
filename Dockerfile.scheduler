@@ -1,0 +1,24 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install cron
+RUN apt-get update && apt-get install -y cron && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code and scheduler script
+COPY pa_power_notifier.py .
+COPY scheduler.sh .
+
+# Create data directory for persistent storage
+RUN mkdir -p /data
+
+# Make scripts executable
+RUN chmod +x pa_power_notifier.py scheduler.sh
+
+# Default command runs the scheduler
+CMD ["./scheduler.sh"]
+

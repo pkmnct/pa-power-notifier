@@ -1,0 +1,36 @@
+services:
+  pa-power-notifier:
+    build: .
+    container_name: pa-power-notifier
+    environment:
+      # Electric API configuration
+      - ELECTRIC_ID=${ELECTRIC_ID:-1180}
+      - ELECTRIC_SERVICE_TYPE=${ELECTRIC_SERVICE_TYPE:-residential}
+      - ELECTRIC_RATE_TYPE=${ELECTRIC_RATE_TYPE:-RS - Regular Residential Service}
+      
+      # Gas API configuration
+      - GAS_ID=${GAS_ID:-4423}
+      - GAS_SERVICE_TYPE=${GAS_SERVICE_TYPE:-residential}
+      
+      # Current rates (set these to your current rates)
+      - CURRENT_ELECTRIC_PRICE=${CURRENT_ELECTRIC_PRICE:-0}
+      - CURRENT_GAS_PRICE=${CURRENT_GAS_PRICE:-0}
+      
+      # Notification threshold (percentage savings to notify)
+      - NOTIFICATION_THRESHOLD=${NOTIFICATION_THRESHOLD:-5.0}
+      
+      # Storage file path
+      - STORAGE_FILE=${STORAGE_FILE:-/data/previous_rates.json}
+      
+      # Schedule (cron format, only used if running scheduler)
+      - SCHEDULE=${SCHEDULE:-0 9 * * *}
+    
+    volumes:
+      - ./data:/data
+    
+    # Run once immediately, then exit
+    # To run periodically, use the scheduler image instead
+    command: python pa_power_notifier.py
+    
+    restart: unless-stopped
+
