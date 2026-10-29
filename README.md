@@ -212,7 +212,7 @@ Set `DUQUESNE_USERNAME` and `DUQUESNE_PASSWORD` (the same login as duquesnelight
 
 This enables: blended effective rate, tariff name when GraphQL provides it, daily/hourly usage, and **current EGS name + supply rate from your bill PDF** (via Puppeteer: `GetAccountBillHistory` → `DisplayBillPdf/{id}`).
 
-If Duquesne's public rate pages are blocked (Incapsula), the bill PDF still provides PTC. You can also set `TOU_FLAT_RATE` / `TOU_PEAK_RATE` / `TOU_OFF_PEAK_RATE` / `TOU_SUPER_OFF_PEAK_RATE` in ¢/kWh. Puppeteer (`make browser-install` + Chrome for Testing) is required for bill-PDF and Incapsula-blocked pages and is **not** bundled in the Docker image yet.
+If Duquesne's public rate pages are blocked (Incapsula), the bill PDF still provides PTC. You can also set `TOU_FLAT_RATE` / `TOU_PEAK_RATE` / `TOU_OFF_PEAK_RATE` / `TOU_SUPER_OFF_PEAK_RATE` in ¢/kWh. Puppeteer is required for bill-PDF and Incapsula-blocked pages. The Docker image bundles Node and Debian's Chromium (works on amd64 and arm64) and Compose enables it by default (`DUQUESNE_USE_PUPPETEER=1`). For local runs, `make browser-install` plus `npx puppeteer browsers install chrome`.
 
 Offline bill parse: save a PDF and set `DUQUESNE_BILL_PDF=/path/to/bill.pdf`.
 

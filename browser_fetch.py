@@ -68,6 +68,11 @@ def _session_cookies_for_puppeteer(session: "requests.Session", page_url: str) -
     return rows
 
 
+def _puppeteer_timeout() -> int:
+    # `or`: Compose passes unset vars through as "" rather than leaving them unset.
+    return int(os.getenv("DUQUESNE_PUPPETEER_TIMEOUT") or "150")
+
+
 def _tsx_binary() -> Optional[Path]:
     p = _BROWSER_DIR / "node_modules" / ".bin" / "tsx"
     return p if p.is_file() else None
@@ -121,7 +126,7 @@ def fetch_html_via_puppeteer(
             cwd=str(_BROWSER_DIR),
             capture_output=True,
             text=True,
-            timeout=int(os.getenv("DUQUESNE_PUPPETEER_TIMEOUT", "150")),
+            timeout=_puppeteer_timeout(),
         )
         if proc.returncode != 0:
             err = (proc.stderr or proc.stdout or "").strip()
@@ -212,7 +217,7 @@ def fetch_duquesne_bill_pdf_via_puppeteer(
             cwd=str(_BROWSER_DIR),
             capture_output=True,
             text=True,
-            timeout=int(os.getenv("DUQUESNE_PUPPETEER_TIMEOUT", "150")),
+            timeout=_puppeteer_timeout(),
         )
         if proc.returncode != 0:
             err = (proc.stderr or proc.stdout or "").strip()

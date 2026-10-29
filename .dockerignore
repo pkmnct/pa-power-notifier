@@ -14,3 +14,10 @@ README.md
 data/
 *.log
 
+.env
+browser/node_modules/
+browser/dist/
+*.network-request
+*.network-response
+response.json
+gasResponse.json

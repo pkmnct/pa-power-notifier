@@ -60,6 +60,8 @@ async function main(): Promise<void> {
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
+      // Docker's default 64MB /dev/shm is too small for Chromium.
+      "--disable-dev-shm-usage",
       "--disable-blink-features=AutomationControlled",
     ],
   });
