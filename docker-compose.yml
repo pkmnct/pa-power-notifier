@@ -2,35 +2,99 @@ services:
   pa-power-notifier:
     build: .
     container_name: pa-power-notifier
+    restart: unless-stopped
     environment:
-      # Electric API configuration
+      # ── Scheduling ─────────────────────────────────────────────────────────
+      # How often to check rates (hours). Set to 0 to run once and exit.
+      - CHECK_INTERVAL_HOURS=${CHECK_INTERVAL_HOURS:-24}
+
+      # ── Logging (verbose troubleshooting) ──────────────────────────────────
+      - PA_POWER_DEBUG=${PA_POWER_DEBUG:-}
+      - LOG_LEVEL=${LOG_LEVEL:-}
+
+      # ── Electric (PA Power Switch) ───────────────────────────────────────────
+      # Match the shop UI: .../shop-for-rates-results/?zipcode=...&serviceType=...
+      #   &distributor=...&distributorrate=...
+      # Or set ELECTRIC_SHOP_RESULTS_URL to that full URL (overrides the four when present).
       - ELECTRIC_ID=${ELECTRIC_ID:-1180}
       - ELECTRIC_SERVICE_TYPE=${ELECTRIC_SERVICE_TYPE:-residential}
       - ELECTRIC_RATE_TYPE=${ELECTRIC_RATE_TYPE:-RS - Regular Residential Service}
-      
-      # Gas API configuration
+      - ELECTRIC_ZIPCODE=${ELECTRIC_ZIPCODE:-}
+      - ELECTRIC_SHOP_RESULTS_URL=${ELECTRIC_SHOP_RESULTS_URL:-}
+
+      # ── Gas (People's Natural Gas) ─────────────────────────────────────────
       - GAS_ID=${GAS_ID:-4423}
       - GAS_SERVICE_TYPE=${GAS_SERVICE_TYPE:-residential}
-      
-      # Current rates (set these to your current rates)
+      # ZIP for the PA Gas Switch shop page: supply-only Price to Compare + price unit
+      # (falls back to ELECTRIC_ZIPCODE)
+      - GAS_ZIPCODE=${GAS_ZIPCODE:-}
+      # Manual fallbacks if the shop page can't be scraped
+      - GAS_PRICE_TO_COMPARE=${GAS_PRICE_TO_COMPARE:-0}
+      - GAS_PRICE_UNIT=${GAS_PRICE_UNIT:-mcf}
+      # e-Account login (optional; enables accurate $/therm from bills + rate alerts)
+      - PEOPLES_GAS_USERNAME=${PEOPLES_GAS_USERNAME:-}
+      - PEOPLES_GAS_PASSWORD=${PEOPLES_GAS_PASSWORD:-}
+      # MCF→therm for comparing to PA Gas Switch CSV (territory-specific)
+      - THERMS_PER_MCF=${THERMS_PER_MCF:-10.37}
+
+      # ── Fallback current rates ──────────────────────────────────────────────
+      # Only used when Duquesne/People's API or scraper cannot determine your rate.
       - CURRENT_ELECTRIC_PRICE=${CURRENT_ELECTRIC_PRICE:-0}
       - CURRENT_GAS_PRICE=${CURRENT_GAS_PRICE:-0}
-      
-      # Notification threshold (percentage savings to notify)
+
+      # ── Duquesne Light account (optional, improves rate + usage accuracy) ──
+      - DUQUESNE_USERNAME=${DUQUESNE_USERNAME:-}
+      - DUQUESNE_PASSWORD=${DUQUESNE_PASSWORD:-}
+      - DUQUESNE_CUSTOMER_UUID=${DUQUESNE_CUSTOMER_UUID:-}
+      - DUQUESNE_CUSTOMER_URN=${DUQUESNE_CUSTOMER_URN:-}
+      - DUQUESNE_UTILITY_ACCOUNT_UUID=${DUQUESNE_UTILITY_ACCOUNT_UUID:-}
+      # Puppeteer fallback for Incapsula-blocked pages (requires Node deps in image — local dev first)
+      - DUQUESNE_USE_PUPPETEER=${DUQUESNE_USE_PUPPETEER:-}
+      - DUQUESNE_PUPPETEER_TIMEOUT=${DUQUESNE_PUPPETEER_TIMEOUT:-}
+      - DUQUESNE_PUPPETEER_HEADLESS=${DUQUESNE_PUPPETEER_HEADLESS:-}
+      - DUQUESNE_PUPPETEER_USER_AGENT=${DUQUESNE_PUPPETEER_USER_AGENT:-}
+
+      # ── Notification settings ───────────────────────────────────────────────
+      # Minimum savings % to trigger an alert (default: 5%)
       - NOTIFICATION_THRESHOLD=${NOTIFICATION_THRESHOLD:-5.0}
-      
-      # Storage file path
+
+      # ── Rate filters ────────────────────────────────────────────────────────
+      # Set to "true" to exclude plans with a cancellation fee
+      - FILTER_NO_CANCELLATION_FEE=${FILTER_NO_CANCELLATION_FEE:-false}
+      # Set to "true" to only consider renewable/solar/green plans
+      - FILTER_RENEWABLE_ONLY=${FILTER_RENEWABLE_ONLY:-false}
+
+      # ── Include Duquesne Light "Price to Compare" as an option ──────────────
+      - INCLUDE_DUQUESNE_AS_OPTION=${INCLUDE_DUQUESNE_AS_OPTION:-true}
+
+      # ── TOU (Time-of-Use) analysis ─────────────────────────────────────────
+      # Hourly usage history is stored here and grows over time (never truncated)
+      - HOURLY_USAGE_FILE=${HOURLY_USAGE_FILE:-/data/hourly_usage.json}
+      # Daily electric + gas month archives (merge-only; survive utility rolling windows)
+      - DAILY_USAGE_FILE=${DAILY_USAGE_FILE:-/data/daily_usage.json}
+      - GAS_USAGE_FILE=${GAS_USAGE_FILE:-/data/gas_usage.json}
+      - BILL_ARCHIVE_DIR=${BILL_ARCHIVE_DIR:-/data/bills}
+      # Parsed TOU rates are cached here (refreshed when the period expires)
+      - TOU_RATES_CACHE_FILE=${TOU_RATES_CACHE_FILE:-/data/tou_rates.json}
+      # Optional: provide a direct PDF URL to skip page scraping
+      # e.g. the latest DSS supplement from duquesnelight.com/docs/...
+      - TOU_RATES_PDF_URL=${TOU_RATES_PDF_URL:-}
+      # Optional manual rate overrides in ¢/kWh (used only if PDF scraping fails)
+      - TOU_PEAK_RATE=${TOU_PEAK_RATE:-}
+      - TOU_OFF_PEAK_RATE=${TOU_OFF_PEAK_RATE:-}
+      - TOU_SUPER_OFF_PEAK_RATE=${TOU_SUPER_OFF_PEAK_RATE:-}
+      - TOU_FLAT_RATE=${TOU_FLAT_RATE:-}
+
+      # ── Email alerts (all required to enable email) ─────────────────────────
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USERNAME=${SMTP_USERNAME:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - NOTIFY_TO_EMAIL=${NOTIFY_TO_EMAIL:-}
+      - NOTIFY_FROM_EMAIL=${NOTIFY_FROM_EMAIL:-}
+
+      # ── Storage ─────────────────────────────────────────────────────────────
       - STORAGE_FILE=${STORAGE_FILE:-/data/previous_rates.json}
-      
-      # Schedule (cron format, only used if running scheduler)
-      - SCHEDULE=${SCHEDULE:-0 9 * * *}
-    
+
     volumes:
       - ./data:/data
-    
-    # Run once immediately, then exit
-    # To run periodically, use the scheduler image instead
-    command: python pa_power_notifier.py
-    
-    restart: unless-stopped
-

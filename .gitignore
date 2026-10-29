@@ -11,4 +11,11 @@ pip-delete-this-directory.txt
 data/
 *.log
 .DS_Store
+.env
+*.network-request
+*.network-response
+response.json
+gasResponse.json
+
+browser/node_modules/
 
