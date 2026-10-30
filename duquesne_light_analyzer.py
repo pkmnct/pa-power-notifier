@@ -29,12 +29,14 @@ logger = logging.getLogger(__name__)
 try:
     from browser_fetch import (
         fetch_html_via_puppeteer,
+        fetch_duquesne_bill_history_via_puppeteer,
         fetch_duquesne_bill_pdf_via_puppeteer,
         html_looks_like_bot_challenge,
         puppeteer_eager_enabled,
     )
 except ImportError:
     fetch_html_via_puppeteer = None  # type: ignore
+    fetch_duquesne_bill_history_via_puppeteer = None  # type: ignore
     fetch_duquesne_bill_pdf_via_puppeteer = None  # type: ignore
     html_looks_like_bot_challenge = lambda _html: False  # type: ignore
     puppeteer_eager_enabled = lambda: False  # type: ignore
@@ -106,6 +108,7 @@ class CurrentEgsFromBill:
     supply_charges_usd: Optional[float] = None
     kwh_on_bill: Optional[float] = None
     source: str = "duquesne_bill_pdf"
+    bill_date: str = ""  # YYYY-MM-DD ("Date Prepared")
 
 
 class DuquesneLightAnalyzer:
@@ -975,14 +978,22 @@ class DuquesneLightAnalyzer:
             return None
 
         supplier = None
-        m = re.search(
-            r"Supply Charges\s*[-–—]\s*(.+?)\s*\$\s*([\d,]+\.?\d*)",
-            text,
-            re.I,
+        # A bill spanning a switch lists one line per provider, letter-spaced and with
+        # service dates: "Supply Charges - Duquesne Li g h t 11/24 - 12/21 $94.97".
+        # Duquesne lines are default service, not an EGS.
+        supply_lines = re.findall(
+            r"Supply Charges\s*[-–—]\s*(.+?)\s*\$\s*([\d,]+\.?\d*)", text, re.I
         )
-        if m:
-            supplier = m.group(1).strip()
-            supply_charges = float(m.group(2).replace(",", ""))
+        egs_lines = [
+            (re.sub(r"\s+\d{1,2}/\d{1,2}\s*-\s*\d{1,2}/\d{1,2}$", "", name.strip()), amount)
+            for name, amount in supply_lines
+            if "duquesnelight" not in re.sub(r"\s+", "", name).lower()
+        ]
+        if egs_lines:
+            supplier = egs_lines[-1][0]
+            supply_charges = float(egs_lines[-1][1].replace(",", ""))
+        elif supply_lines:
+            return None  # Duquesne default service only
         else:
             m = re.search(
                 r"Supply Charges\s*[-–—]\s*(.+?)(?:\n|$)",
@@ -1032,6 +1043,7 @@ class DuquesneLightAnalyzer:
             if m:
                 schedule = m.group(1).strip()
 
+        meta = DuquesneLightAnalyzer.parse_bill_meta(text)
         return CurrentEgsFromBill(
             supplier=supplier,
             supply_rate_per_kwh=rate,
@@ -1040,7 +1052,83 @@ class DuquesneLightAnalyzer:
             bill_id=bill_id,
             supply_charges_usd=supply_charges,
             kwh_on_bill=kwh,
+            bill_date=meta["bill_date"],
         )
+
+    @staticmethod
+    def parse_bill_meta(text: str) -> Dict[str, str]:
+        """
+        Bill date from bill PDF text (present with or without an EGS).
+
+          Bill ID: 100000000000 Date Prepared: 08/27/2026
+
+        (The bill's "Supplier Agreement ID" is account-level — unchanged across
+        suppliers — so it can't mark re-enrollment and isn't recorded.)
+        """
+        out = {"bill_date": ""}
+        m = re.search(r"Date Prepared:\s*(\d{1,2})/(\d{1,2})/(\d{4})", text or "", re.I)
+        if m:
+            out["bill_date"] = f"{m.group(3)}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+        return out
+
+    @staticmethod
+    def _bill_pdf_text(path: str) -> Optional[str]:
+        if not _PDFPLUMBER_AVAILABLE:
+            logger.warning("pdfplumber not installed — cannot parse bill PDF")
+            return None
+        try:
+            with pdfplumber.open(path) as doc:
+                return "\n".join((p.extract_text() or "") for p in doc.pages)
+        except Exception as e:
+            logger.warning("Failed to read bill PDF %s: %s", path, e)
+            return None
+
+    def backfill_bill_archive(self, archive) -> int:
+        """
+        Download every Duquesne bill not yet in `archive` (a usage_archive.BillArchive)
+        and record each bill's supplier, so supplier history survives Duquesne dropping
+        old bills. Returns the number of bills added.
+        """
+        if fetch_duquesne_bill_history_via_puppeteer is None:
+            return 0
+        if not self._login():
+            return 0
+        try:
+            self._session.get(_DLC_ACCOUNT_SUMMARY_URL, timeout=30)
+        except Exception:
+            pass
+
+        import tempfile
+
+        added = 0
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = fetch_duquesne_bill_history_via_puppeteer(
+                self._session, tmp, skip_ids=archive.known_ids()
+            )
+            for row in rows or []:
+                bill_id = str(row.get("billId") or "")
+                if not bill_id:
+                    continue
+                if row.get("skipped"):
+                    archive.set_bill_date(bill_id, row.get("date") or "")
+                    continue
+                text = self._bill_pdf_text(row.get("pdfPath") or "")
+                if text is None:
+                    continue
+                meta = self.parse_bill_meta(text)
+                egs = self.parse_egs_from_bill_text(text, bill_id=bill_id)
+                archive.archive_pdf(
+                    row["pdfPath"],
+                    bill_id,
+                    egs=egs,
+                    bill_date=row.get("date") or meta["bill_date"],
+                    supplier=egs.supplier if egs else "",
+                    update_latest=False,
+                )
+                added += 1
+        if added:
+            logger.info("Backfilled %d Duquesne bills into the bill archive", added)
+        return added
 
     def fetch_current_egs_from_bill(
         self,
@@ -1086,15 +1174,8 @@ class DuquesneLightAnalyzer:
             logger.warning("Bill PDF not found at %s", path)
             return None
 
-        if not _PDFPLUMBER_AVAILABLE:
-            logger.warning("pdfplumber not installed — cannot parse bill PDF")
-            return None
-
-        try:
-            with pdfplumber.open(path) as doc:
-                text = "\n".join((p.extract_text() or "") for p in doc.pages)
-        except Exception as e:
-            logger.warning("Failed to read bill PDF %s: %s", path, e)
+        text = self._bill_pdf_text(path)
+        if text is None:
             return None
 
         egs = self.parse_egs_from_bill_text(text, bill_id=meta_bill_id)

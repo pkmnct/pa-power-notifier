@@ -93,6 +93,14 @@ Your current rate is resolved in this priority order — you only need to set th
 
 **Electric blended (all-in):** Duquesne Opower usage API → bill PTC → `CURRENT_ELECTRIC_PRICE` (context only; not used as the switch baseline)
 
+**New-customer-only offers:** offers marked "New Customers Offer" on PA Power/Gas Switch, or described as new-customers-only, are skipped when you've used that supplier at this address — unless the offer's stated re-eligibility window (e.g. "two years from the sign-up date") has passed. Electric supplier history is built from every Duquesne bill, downloaded into `BILL_ARCHIVE_DIR` and kept after Duquesne drops it.
+
+| Variable | Default | Description |
+|---|---|---|
+| `PRIOR_ELECTRIC_SUPPLIERS` | _(none)_ | Suppliers used before your oldest archived bill: `Name@YYYY-MM-DD; Other Name` (date = last month on it; optional) |
+| `PRIOR_GAS_SUPPLIERS` | _(none)_ | Past gas suppliers, same format (People's bills don't name one) |
+| `BILL_HISTORY_BACKFILL` | `1` | Download Duquesne bills not yet archived on each run |
+
 **Gas supply (stay baseline):** PA Gas Switch shop-page Price to Compare (needs `GAS_ZIPCODE`) → `GAS_PRICE_TO_COMPARE`. Gas is ranked in the unit PA Gas Switch quotes (Mcf for Peoples), with forecast usage converted via `THERMS_PER_MCF`.
 
 **Gas blended (all-in):** People's Gas portal (login) → scraped People's Gas rate page → `CURRENT_GAS_PRICE` (context only; used as the baseline only when no Price to Compare is available)

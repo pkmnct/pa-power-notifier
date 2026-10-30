@@ -162,17 +162,8 @@ def puppeteer_eager_enabled() -> bool:
     )
 
 
-def fetch_duquesne_bill_pdf_via_puppeteer(
-    session: "requests.Session",
-    out_pdf: str,
-    bill_id: Optional[str] = None,
-) -> Optional[dict]:
-    """
-    Download the latest (or specified) Duquesne bill PDF via Puppeteer.
-
-    Returns {"billId", "pdfPath", "bytes"} or None on failure.
-    Requires browser/ npm install + Chrome for Testing.
-    """
+def _run_bill_script(session: "requests.Session", args: List[str], label: str) -> Optional[List[str]]:
+    """Run browser/src/fetch-bill-pdf.ts with the session's cookies; return stdout lines."""
     script = _BROWSER_DIR / "src" / "fetch-bill-pdf.ts"
     if not script.is_file():
         logger.debug("Bill PDF script missing at %s", script)
@@ -200,18 +191,7 @@ def fetch_duquesne_bill_pdf_via_puppeteer(
             json.dump(cookies, tf)
             tmp_path = tf.name
 
-        cmd: List[str] = [
-            str(tsx),
-            str(script),
-            "--cookies-file",
-            tmp_path,
-            "--out-pdf",
-            out_pdf,
-        ]
-        if bill_id:
-            cmd.extend(["--bill-id", bill_id])
-
-        logger.info("Fetching Duquesne bill PDF via Puppeteer (bill_id=%s)", bill_id or "latest")
+        cmd: List[str] = [str(tsx), str(script), "--cookies-file", tmp_path, *args]
         proc = subprocess.run(
             cmd,
             cwd=str(_BROWSER_DIR),
@@ -221,19 +201,14 @@ def fetch_duquesne_bill_pdf_via_puppeteer(
         )
         if proc.returncode != 0:
             err = (proc.stderr or proc.stdout or "").strip()
-            logger.warning("Bill PDF fetch failed (%s): %s", proc.returncode, err[:500])
+            logger.warning("%s failed (%s): %s", label, proc.returncode, err[:500])
             return None
-
-        line = (proc.stdout or "").strip().splitlines()
-        if not line:
-            logger.warning("Bill PDF fetch returned no summary JSON")
-            return None
-        return json.loads(line[-1])
+        return (proc.stdout or "").strip().splitlines()
     except subprocess.TimeoutExpired:
-        logger.warning("Bill PDF fetch timed out")
+        logger.warning("%s timed out", label)
         return None
     except Exception as e:
-        logger.warning("Bill PDF fetch error: %s", e)
+        logger.warning("%s error: %s", label, e)
         return None
     finally:
         if tmp_path:
@@ -241,3 +216,60 @@ def fetch_duquesne_bill_pdf_via_puppeteer(
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
+
+def fetch_duquesne_bill_pdf_via_puppeteer(
+    session: "requests.Session",
+    out_pdf: str,
+    bill_id: Optional[str] = None,
+) -> Optional[dict]:
+    """
+    Download the latest (or specified) Duquesne bill PDF via Puppeteer.
+
+    Returns {"billId", "pdfPath", "bytes"} or None on failure.
+    Requires browser/ npm install + Chrome for Testing.
+    """
+    args = ["--out-pdf", out_pdf]
+    if bill_id:
+        args.extend(["--bill-id", bill_id])
+    logger.info("Fetching Duquesne bill PDF via Puppeteer (bill_id=%s)", bill_id or "latest")
+    lines = _run_bill_script(session, args, "Bill PDF fetch")
+    if lines is None:
+        return None
+    if not lines:
+        logger.warning("Bill PDF fetch returned no summary JSON")
+        return None
+    try:
+        return json.loads(lines[-1])
+    except ValueError as e:
+        logger.warning("Bill PDF fetch returned unreadable summary: %s", e)
+        return None
+
+
+def fetch_duquesne_bill_history_via_puppeteer(
+    session: "requests.Session",
+    out_dir: str,
+    skip_ids: Optional[List[str]] = None,
+) -> Optional[List[dict]]:
+    """
+    Download every bill PDF in the account's bill history except skip_ids.
+
+    Returns one dict per history row — {"billId", "date", "pdfPath", "bytes"}, or
+    {"billId", "date", "skipped": True} for skip_ids — or None on failure.
+    """
+    args = ["--all", "--out-dir", out_dir]
+    if skip_ids:
+        args.extend(["--skip-ids", ",".join(skip_ids)])
+    logger.info(
+        "Fetching Duquesne bill history via Puppeteer (%d already archived)", len(skip_ids or [])
+    )
+    lines = _run_bill_script(session, args, "Bill history fetch")
+    if lines is None:
+        return None
+    rows = []
+    for line in lines:
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            logger.debug("Skipping non-JSON bill history line: %s", line[:200])
+    return rows

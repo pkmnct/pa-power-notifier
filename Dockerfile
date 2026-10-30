@@ -35,6 +35,7 @@ COPY duquesne_light_analyzer.py .
 COPY peoples_gas_analyzer.py .
 COPY tou_analyzer.py .
 COPY usage_archive.py .
+COPY supplier_history.py .
 COPY browser_fetch.py .
 
 RUN mkdir -p /data

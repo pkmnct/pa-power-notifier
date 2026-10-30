@@ -31,6 +31,14 @@ services:
       # Manual fallbacks if the shop page can't be scraped
       - GAS_PRICE_TO_COMPARE=${GAS_PRICE_TO_COMPARE:-0}
       - GAS_PRICE_UNIT=${GAS_PRICE_UNIT:-mcf}
+
+      # ── Supplier history (new-customer-only offers) ───────────────────────
+      # Electric history comes from archived Duquesne bills; list older or gas
+      # suppliers as "Name@YYYY-MM-DD; Other Name" (date = last month on it).
+      - PRIOR_ELECTRIC_SUPPLIERS=${PRIOR_ELECTRIC_SUPPLIERS:-}
+      - PRIOR_GAS_SUPPLIERS=${PRIOR_GAS_SUPPLIERS:-}
+      # Download Duquesne bills not yet archived each run (0 to disable)
+      - BILL_HISTORY_BACKFILL=${BILL_HISTORY_BACKFILL:-1}
       # e-Account login (optional; enables accurate $/therm from bills + rate alerts)
       - PEOPLES_GAS_USERNAME=${PEOPLES_GAS_USERNAME:-}
       - PEOPLES_GAS_PASSWORD=${PEOPLES_GAS_PASSWORD:-}

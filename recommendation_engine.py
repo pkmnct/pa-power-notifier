@@ -53,6 +53,12 @@ except ImportError:
     TOUAnalyzer = None  # type: ignore
 
 try:
+    from supplier_history import ineligible_reason, prior_suppliers
+except ImportError:
+    ineligible_reason = None  # type: ignore
+    prior_suppliers = None  # type: ignore
+
+try:
     from usage_archive import BillArchive, DailyElectricUsageStore, GasUsageStore
 except ImportError:
     DailyElectricUsageStore = None  # type: ignore
@@ -683,6 +689,51 @@ def trend_note(history: List[Dict[str, Any]], utility: str, current_top: Optiona
     )
 
 
+def _electric_supplier_history(checker: Any, report: CheckReport) -> List[dict]:
+    """Archive any Duquesne bills not yet saved, then list the suppliers on them."""
+    if BillArchive is None:
+        return []
+    archive = BillArchive(getattr(checker, "bill_archive_dir", None))
+    backfill = os.getenv("BILL_HISTORY_BACKFILL", "1").strip().lower() not in ("0", "false", "no", "off")
+    if backfill and DuquesneLightAnalyzer is not None:
+        try:
+            added = DuquesneLightAnalyzer().backfill_bill_archive(archive)
+            if added:
+                report.add_warning("info", "duquesne", f"Archived {added} older bill(s) for supplier history.")
+        except Exception as e:
+            report.add_warning("warning", "duquesne", f"Bill history backfill failed: {e}")
+    history = archive.supplier_history()
+    if history:
+        report.add_warning(
+            "info",
+            "electric",
+            "Supplier history from bills: "
+            + "; ".join(f"{h['supplier']} ({h['first_bill']} → {h['last_bill']})" for h in history),
+        )
+    return history
+
+
+def _drop_ineligible(rates: list, history: list, report: CheckReport, utility: str) -> list:
+    """Remove new-customer-only offers from suppliers you've already used."""
+    if ineligible_reason is None or not history:
+        return rates
+    kept = []
+    skipped: Dict[str, List[str]] = {}
+    for r in rates:
+        why = ineligible_reason(r, history)
+        if why:
+            skipped.setdefault(r.supplier.strip(), []).append(why)
+        else:
+            kept.append(r)
+    for supplier, reasons in skipped.items():
+        report.add_warning(
+            "info",
+            utility,
+            f"Skipped {len(reasons)} {supplier} offer(s): {reasons[0]}",
+        )
+    return kept
+
+
 def _filters_list(checker: Any) -> List[str]:
     out = []
     if getattr(checker, "filter_no_cancellation_fee", False):
@@ -909,6 +960,13 @@ def build_check_report(checker: Any) -> CheckReport:
     filtered_e = checker.apply_filters(electric_rates)
     if electric_rates and not filtered_e:
         report.add_warning("warning", "electric", "Filters removed every electric offer.")
+    if prior_suppliers is not None:
+        elec_history = prior_suppliers(
+            "electric",
+            _electric_supplier_history(checker, report),
+            current_supplier=egs.supplier if egs else "",
+        )
+        filtered_e = _drop_ineligible(filtered_e, elec_history, report, "electric")
     ranked_e: List[RankedOption] = []
     if annual_kwh > 0:
         ranked_e = rank_plans_by_annual(filtered_e, annual_kwh, "kWh")
@@ -1096,6 +1154,9 @@ def build_check_report(checker: Any) -> CheckReport:
     filtered_g = checker.apply_filters(gas_rates)
     if gas_rates and not filtered_g:
         report.add_warning("warning", "gas", "Filters removed every gas offer.")
+    if prior_suppliers is not None:
+        # No supplier on People's bills to read; PRIOR_GAS_SUPPLIERS covers past suppliers.
+        filtered_g = _drop_ineligible(filtered_g, prior_suppliers("gas"), report, "gas")
     ranked_g: List[RankedOption] = []
     if annual_gas_units > 0:
         ranked_g = rank_plans_by_annual(filtered_g, annual_gas_units, gas_unit)

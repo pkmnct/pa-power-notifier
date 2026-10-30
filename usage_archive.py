@@ -15,6 +15,7 @@ Env (optional overrides; defaults under repo ./data or /data in Docker):
 from __future__ import annotations
 
 import json
+import re
 import logging
 import os
 import shutil
@@ -311,10 +312,15 @@ class BillArchive:
         src_pdf: str,
         bill_id: str,
         egs: Optional[Any] = None,
+        bill_date: str = "",
+        supplier: Optional[str] = None,
+        update_latest: bool = True,
     ) -> Optional[str]:
         """
         Copy src_pdf into the archive as {bill_id}.pdf (no overwrite if present).
-        Updates index with EGS metadata when provided.
+        Updates index with EGS metadata when provided. supplier is the EGS on that bill
+        ("" for Duquesne default service); it defaults to egs.supplier when egs is given.
+        update_latest=False when backfilling older bills, so latest_bill.pdf stays current.
         """
         if not bill_id or not src_pdf or not os.path.exists(src_pdf):
             return None
@@ -342,18 +348,74 @@ class BillArchive:
                     entry["egs"] = asdict(egs)
                 elif isinstance(egs, dict):
                     entry["egs"] = egs
+            egs_dict = entry.get("egs") or {}
+            if supplier is None and egs is not None:
+                supplier = egs_dict.get("supplier") or ""
+            if supplier is not None:
+                entry["supplier"] = supplier
+            bill_date = bill_date or egs_dict.get("bill_date") or ""
+            if bill_date and not entry.get("bill_date"):
+                entry["bill_date"] = bill_date
             self._index[bill_id] = entry
             self._save_index()
-            # Also keep a convenience pointer to the newest PDF
-            latest = self.directory / "latest_bill.pdf"
-            try:
-                shutil.copy2(dest, latest)
-            except Exception:
-                pass
+            if update_latest:
+                # Also keep a convenience pointer to the newest PDF
+                latest = self.directory / "latest_bill.pdf"
+                try:
+                    shutil.copy2(dest, latest)
+                except Exception:
+                    pass
             return str(dest)
         except Exception as e:
             logger.warning("Could not archive bill PDF: %s", e)
             return None
+
+    def known_ids(self) -> List[str]:
+        return sorted(self._index)
+
+    def set_bill_date(self, bill_id: str, bill_date: str) -> None:
+        """Fill in a bill's date (from Duquesne's bill history) if it isn't recorded yet."""
+        entry = self._index.get(bill_id)
+        if entry is None or not bill_date or entry.get("bill_date"):
+            return
+        entry["bill_date"] = bill_date
+        # Bills archived before supplier was recorded carry it inside egs
+        if "supplier" not in entry and (entry.get("egs") or {}).get("supplier"):
+            entry["supplier"] = entry["egs"]["supplier"]
+        self._save_index()
+
+    def supplier_history(self) -> List[dict]:
+        """
+        Electric suppliers seen on archived bills, oldest first:
+        [{"supplier", "first_bill", "last_bill"}]. Bills on Duquesne default service
+        (supplier "") are left out; bills without a date are ignored. A name cut short by
+        the bill's letter-spacing ("AMERICAN P O W E R") merges into the full name.
+        """
+        by_supplier: Dict[str, dict] = {}
+        for entry in self._index.values():
+            supplier = entry.get("supplier")
+            if supplier is None:
+                supplier = (entry.get("egs") or {}).get("supplier") or ""
+            when = entry.get("bill_date") or ""
+            if not supplier or not when:
+                continue
+            row = by_supplier.setdefault(
+                supplier, {"supplier": supplier, "first_bill": when, "last_bill": when}
+            )
+            row["first_bill"] = min(row["first_bill"], when)
+            row["last_bill"] = max(row["last_bill"], when)
+
+        def squash(name: str) -> str:
+            return re.sub(r"[^a-z0-9]", "", name.lower().replace("&", "and"))
+
+        for short in sorted(by_supplier, key=len):
+            for full in by_supplier:
+                if full != short and len(squash(short)) >= 8 and squash(full).startswith(squash(short)):
+                    row = by_supplier.pop(short)
+                    by_supplier[full]["first_bill"] = min(by_supplier[full]["first_bill"], row["first_bill"])
+                    by_supplier[full]["last_bill"] = max(by_supplier[full]["last_bill"], row["last_bill"])
+                    break
+        return sorted(by_supplier.values(), key=lambda r: r["first_bill"])
 
     def latest_egs(self) -> Optional[dict]:
         if not self._index:

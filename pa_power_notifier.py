@@ -130,6 +130,7 @@ class Rate:
     term_end_date: str
     term_length: str
     utility_type: str  # 'electric' or 'gas'
+    new_customers_offer: str = ''  # CSV "New Customers Offer": Yes = new customers only
 
     def get_numeric_price(self) -> Optional[float]:
         try:
@@ -571,6 +572,7 @@ class RateChecker:
                 term_end_date=row.get('Term End Date', ''),
                 term_length=row.get('Term Length', ''),
                 utility_type=utility_type,
+                new_customers_offer=row.get('New Customers Offer', ''),
             )
             for row in reader
         ]
