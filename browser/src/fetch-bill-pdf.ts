@@ -189,24 +189,32 @@ async function main(): Promise<void> {
       return;
     }
 
-    let billId = billIdArg;
-    if (!billId) {
-      const rows = await getHistory();
-      // Prefer the most recent bill that already has an amount (skip current open bill if present).
-      // History is newest-first; index 0 is often the open "amount due" row, index 1 the last closed bill.
-      billId =
-        rows.find((row, i) => i > 0 && row.Id)?.Id ||
-        rows.find((row) => row.Id)?.Id ||
-        null;
-      if (!billId) {
-        throw new Error("No bill Id found in GetAccountBillHistory payload");
-      }
+    // History is newest-first. The newest row is the latest issued bill (its amount is
+    // still due, but its PDF exists); fall back to the next one if its PDF won't load.
+    const candidates = billIdArg
+      ? [billIdArg]
+      : (await getHistory())
+          .map((row) => row.Id)
+          .filter((id): id is string => Boolean(id))
+          .slice(0, 2);
+    if (candidates.length === 0) {
+      throw new Error("No bill Id found in GetAccountBillHistory payload");
     }
 
-    const bytes = await downloadPdf(billId, outPdf);
-    process.stdout.write(
-      JSON.stringify({ billId, pdfPath: outPdf, bytes }) + "\n",
-    );
+    let lastError: unknown;
+    for (const billId of candidates) {
+      try {
+        const bytes = await downloadPdf(billId, outPdf);
+        process.stdout.write(
+          JSON.stringify({ billId, pdfPath: outPdf, bytes }) + "\n",
+        );
+        return;
+      } catch (err) {
+        lastError = err;
+        console.error(err instanceof Error ? err.message : err);
+      }
+    }
+    throw lastError;
   } finally {
     await browser.close();
   }
