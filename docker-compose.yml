@@ -7,6 +7,8 @@ services:
       # ── Scheduling ─────────────────────────────────────────────────────────
       # How often to check rates (hours). Set to 0 to run once and exit.
       - CHECK_INTERVAL_HOURS=${CHECK_INTERVAL_HOURS:-24}
+      # Local time for report names, daily archives and TOU windows
+      - TZ=${TZ:-America/New_York}
 
       # ── Logging (verbose troubleshooting) ──────────────────────────────────
       - PA_POWER_DEBUG=${PA_POWER_DEBUG:-}
@@ -16,21 +18,21 @@ services:
       # Match the shop UI: .../shop-for-rates-results/?zipcode=...&serviceType=...
       #   &distributor=...&distributorrate=...
       # Or set ELECTRIC_SHOP_RESULTS_URL to that full URL (overrides the four when present).
-      - ELECTRIC_ID=${ELECTRIC_ID:-1180}
+      - ELECTRIC_ID=${ELECTRIC_ID:-}
       - ELECTRIC_SERVICE_TYPE=${ELECTRIC_SERVICE_TYPE:-residential}
-      - ELECTRIC_RATE_TYPE=${ELECTRIC_RATE_TYPE:-RS - Regular Residential Service}
+      - ELECTRIC_RATE_TYPE=${ELECTRIC_RATE_TYPE:-}
       - ELECTRIC_ZIPCODE=${ELECTRIC_ZIPCODE:-}
       - ELECTRIC_SHOP_RESULTS_URL=${ELECTRIC_SHOP_RESULTS_URL:-}
 
       # ── Gas (People's Natural Gas) ─────────────────────────────────────────
-      - GAS_ID=${GAS_ID:-4423}
+      - GAS_ID=${GAS_ID:-}
       - GAS_SERVICE_TYPE=${GAS_SERVICE_TYPE:-residential}
       # ZIP for the PA Gas Switch shop page: supply-only Price to Compare + price unit
       # (falls back to ELECTRIC_ZIPCODE)
       - GAS_ZIPCODE=${GAS_ZIPCODE:-}
       # Manual fallbacks if the shop page can't be scraped
       - GAS_PRICE_TO_COMPARE=${GAS_PRICE_TO_COMPARE:-0}
-      - GAS_PRICE_UNIT=${GAS_PRICE_UNIT:-mcf}
+      - GAS_PRICE_UNIT=${GAS_PRICE_UNIT:-}
 
       # ── Supplier history (new-customer-only offers) ───────────────────────
       # Electric history comes from archived Duquesne bills; list older or gas
@@ -66,6 +68,8 @@ services:
       # ── Notification settings ───────────────────────────────────────────────
       # Minimum savings % to trigger an alert (default: 5%)
       - NOTIFICATION_THRESHOLD=${NOTIFICATION_THRESHOLD:-5.0}
+      # Email once when your own supply rate rises this % between bills (variable-rate jumps)
+      - RATE_JUMP_ALERT_PCT=${RATE_JUMP_ALERT_PCT:-10}
 
       # ── Rate filters ────────────────────────────────────────────────────────
       # Set to "true" to exclude plans with a cancellation fee
@@ -77,14 +81,6 @@ services:
       - INCLUDE_DUQUESNE_AS_OPTION=${INCLUDE_DUQUESNE_AS_OPTION:-true}
 
       # ── TOU (Time-of-Use) analysis ─────────────────────────────────────────
-      # Hourly usage history is stored here and grows over time (never truncated)
-      - HOURLY_USAGE_FILE=${HOURLY_USAGE_FILE:-/data/hourly_usage.json}
-      # Daily electric + gas month archives (merge-only; survive utility rolling windows)
-      - DAILY_USAGE_FILE=${DAILY_USAGE_FILE:-/data/daily_usage.json}
-      - GAS_USAGE_FILE=${GAS_USAGE_FILE:-/data/gas_usage.json}
-      - BILL_ARCHIVE_DIR=${BILL_ARCHIVE_DIR:-/data/bills}
-      # Parsed TOU rates are cached here (refreshed when the period expires)
-      - TOU_RATES_CACHE_FILE=${TOU_RATES_CACHE_FILE:-/data/tou_rates.json}
       # Optional: provide a direct PDF URL to skip page scraping
       # e.g. the latest DSS supplement from duquesnelight.com/docs/...
       - TOU_RATES_PDF_URL=${TOU_RATES_PDF_URL:-}
@@ -102,8 +98,12 @@ services:
       - NOTIFY_TO_EMAIL=${NOTIFY_TO_EMAIL:-}
       - NOTIFY_FROM_EMAIL=${NOTIFY_FROM_EMAIL:-}
 
-      # ── Storage ─────────────────────────────────────────────────────────────
-      - STORAGE_FILE=${STORAGE_FILE:-/data/previous_rates.json}
-
+    # Everything persisted lives under /data (the image sets DATA_DIR=/data):
+    #   hourly_usage.json, daily_usage.json, gas_usage.json  usage history (merge-only)
+    #   bills/, gas_bills/        Duquesne + People's bill PDFs with parsed index.json
+    #   market/                   daily offer CSVs + price_to_compare.jsonl
+    #   reports/                  every run's report (.txt + .html)
+    #   previous_rates.json, rate_alerts.json, tou_rates.json  run state
+    # Override single paths with HOURLY_USAGE_FILE, BILL_ARCHIVE_DIR, etc. if needed.
     volumes:
       - ./data:/data

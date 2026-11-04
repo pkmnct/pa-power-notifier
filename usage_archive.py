@@ -26,11 +26,11 @@ from typing import Any, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_REPO_ROOT = Path(__file__).resolve().parent
+from env_bootstrap import data_dir
 
 
 def _default_data_path(name: str) -> str:
-    return str(_REPO_ROOT / "data" / name)
+    return str(data_dir() / name)
 
 
 def daily_usage_path() -> str:
@@ -43,6 +43,18 @@ def gas_usage_path() -> str:
 
 def bill_archive_dir() -> str:
     return os.getenv("BILL_ARCHIVE_DIR", _default_data_path("bills"))
+
+
+def gas_bill_archive_dir() -> str:
+    return os.getenv("GAS_BILL_ARCHIVE_DIR", _default_data_path("gas_bills"))
+
+
+def market_archive_dir() -> str:
+    return os.getenv("MARKET_ARCHIVE_DIR", _default_data_path("market"))
+
+
+def report_archive_dir() -> str:
+    return os.getenv("REPORT_ARCHIVE_DIR", _default_data_path("reports"))
 
 
 @dataclass
@@ -295,6 +307,11 @@ class BillArchive:
         try:
             data = json.loads(self.index_path.read_text())
             self._index = {str(k): v for k, v in (data.get("bills") or {}).items()}
+            # "pdf" is a filename beside index.json; older entries held absolute paths,
+            # which break when data/ moves between machines or into a container.
+            for entry in self._index.values():
+                if entry.get("pdf"):
+                    entry["pdf"] = Path(entry["pdf"]).name
         except Exception as e:
             logger.warning("Could not load bill archive index: %s", e)
 
@@ -314,12 +331,14 @@ class BillArchive:
         egs: Optional[Any] = None,
         bill_date: str = "",
         supplier: Optional[str] = None,
+        details: Optional[dict] = None,
         update_latest: bool = True,
     ) -> Optional[str]:
         """
         Copy src_pdf into the archive as {bill_id}.pdf (no overwrite if present).
         Updates index with EGS metadata when provided. supplier is the EGS on that bill
         ("" for Duquesne default service); it defaults to egs.supplier when egs is given.
+        details holds any other parsed fields (People's Gas rates, Mcf, amounts).
         update_latest=False when backfilling older bills, so latest_bill.pdf stays current.
         """
         if not bill_id or not src_pdf or not os.path.exists(src_pdf):
@@ -337,7 +356,7 @@ class BillArchive:
             entry.update(
                 {
                     "bill_id": bill_id,
-                    "pdf": str(dest),
+                    "pdf": dest.name,
                     "archived_at": entry.get("archived_at")
                     or datetime.now().isoformat(timespec="seconds"),
                     "last_seen_at": datetime.now().isoformat(timespec="seconds"),
@@ -353,6 +372,8 @@ class BillArchive:
                 supplier = egs_dict.get("supplier") or ""
             if supplier is not None:
                 entry["supplier"] = supplier
+            if details:
+                entry["details"] = {**(entry.get("details") or {}), **details}
             bill_date = bill_date or egs_dict.get("bill_date") or ""
             if bill_date and not entry.get("bill_date"):
                 entry["bill_date"] = bill_date
@@ -373,16 +394,38 @@ class BillArchive:
     def known_ids(self) -> List[str]:
         return sorted(self._index)
 
-    def set_bill_date(self, bill_id: str, bill_date: str) -> None:
-        """Fill in a bill's date (from Duquesne's bill history) if it isn't recorded yet."""
+    def fill_bill_meta(self, bill_id: str, bill_date: str, details: Optional[dict] = None) -> None:
+        """Fill in a bill's date and details (from the bill history) where not recorded yet."""
         entry = self._index.get(bill_id)
-        if entry is None or not bill_date or entry.get("bill_date"):
+        if entry is None:
             return
-        entry["bill_date"] = bill_date
+        missing = {k: v for k, v in (details or {}).items() if v is not None and k not in (entry.get("details") or {})}
+        if (not bill_date or entry.get("bill_date")) and not missing:
+            return
+        if bill_date and not entry.get("bill_date"):
+            entry["bill_date"] = bill_date
+        if missing:
+            entry["details"] = {**(entry.get("details") or {}), **missing}
         # Bills archived before supplier was recorded carry it inside egs
         if "supplier" not in entry and (entry.get("egs") or {}).get("supplier"):
             entry["supplier"] = entry["egs"]["supplier"]
         self._save_index()
+
+    def supply_rate_history(self) -> List[dict]:
+        """[{"bill_id", "bill_date", "supplier", "rate"}] for bills with an EGS supply rate, oldest first."""
+        rows = []
+        for bill_id, entry in self._index.items():
+            egs = entry.get("egs") or {}
+            if entry.get("bill_date") and egs.get("supply_rate_per_kwh"):
+                rows.append(
+                    {
+                        "bill_id": bill_id,
+                        "bill_date": entry["bill_date"],
+                        "supplier": entry.get("supplier") or egs.get("supplier") or "",
+                        "rate": float(egs["supply_rate_per_kwh"]),
+                    }
+                )
+        return sorted(rows, key=lambda r: r["bill_date"])
 
     def supplier_history(self) -> List[dict]:
         """
@@ -426,3 +469,60 @@ class BillArchive:
 
         _bid, entry = max(self._index.items(), key=sort_key)
         return (entry or {}).get("egs")
+
+
+class MarketArchive:
+    """
+    Daily copies of the PA Power/Gas Switch offer CSVs plus a Price to Compare log, for
+    mining how offers and default-service prices move over time.
+
+      market/electric/YYYY-MM-DD.csv, market/gas/YYYY-MM-DD.csv  (last run of the day wins)
+      market/price_to_compare.jsonl  (one line per utility per day)
+    """
+
+    def __init__(self, directory: Optional[str] = None):
+        self.directory = Path(directory or market_archive_dir())
+
+    def save_offers_csv(self, utility: str, csv_text: str, day: Optional[str] = None) -> Optional[str]:
+        if not csv_text:
+            return None
+        day = day or datetime.now().date().isoformat()
+        try:
+            dest = self.directory / utility / f"{day}.csv"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(csv_text)
+            return str(dest)
+        except Exception as e:
+            logger.warning("Could not archive %s offers CSV: %s", utility, e)
+            return None
+
+    def log_price_to_compare(
+        self, utility: str, price: float, unit: str, source: str, day: Optional[str] = None
+    ) -> None:
+        day = day or datetime.now().date().isoformat()
+        path = self.directory / "price_to_compare.jsonl"
+        try:
+            rows = []
+            if path.is_file():
+                rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+            rows = [r for r in rows if not (r.get("date") == day and r.get("utility") == utility)]
+            rows.append({"date": day, "utility": utility, "price": price, "unit": unit, "source": source})
+            rows.sort(key=lambda r: (r.get("date", ""), r.get("utility", "")))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        except Exception as e:
+            logger.warning("Could not log %s Price to Compare: %s", utility, e)
+
+
+def save_report(text: str, html: str, directory: Optional[str] = None) -> Optional[str]:
+    """Keep each run's report as reports/YYYY-MM-DDTHH-MM-SS.{txt,html}."""
+    base = Path(directory or report_archive_dir())
+    stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        (base / f"{stamp}.txt").write_text(text)
+        (base / f"{stamp}.html").write_text(html)
+        return str(base / f"{stamp}.txt")
+    except Exception as e:
+        logger.warning("Could not archive report: %s", e)
+        return None

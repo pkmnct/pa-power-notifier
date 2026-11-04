@@ -34,7 +34,6 @@ logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parent
 _BROWSER_DIR = _REPO_ROOT / "browser"
-_TS_SCRIPT = _BROWSER_DIR / "src" / "fetch-html.ts"
 
 
 def html_looks_like_bot_challenge(html: str) -> bool:
@@ -78,22 +77,33 @@ def _tsx_binary() -> Optional[Path]:
     return p if p.is_file() else None
 
 
+def _script_command(name: str) -> Optional[List[str]]:
+    """
+    Command to run browser script `name` (e.g. "fetch-html"): tsx on the TypeScript
+    source in a dev checkout, else node on the compiled JS (the image ships no tsx).
+    """
+    tsx = _tsx_binary()
+    src = _BROWSER_DIR / "src" / f"{name}.ts"
+    if tsx is not None and src.is_file():
+        return [str(tsx), str(src)]
+    dist = _BROWSER_DIR / "dist" / f"{name}.js"
+    if dist.is_file():
+        return ["node", str(dist)]
+    return None
+
+
 def fetch_html_via_puppeteer(
     url: str,
     session: Optional["requests.Session"] = None,
 ) -> Optional[str]:
     """
-    Run browser/src/fetch-html.ts via tsx; return page HTML or None on failure.
+    Run browser/src/fetch-html.ts; return page HTML or None on failure.
     """
-    if not _TS_SCRIPT.is_file():
-        logger.debug("Puppeteer script missing at %s", _TS_SCRIPT)
-        return None
-
-    tsx = _tsx_binary()
-    if tsx is None:
+    script = _script_command("fetch-html")
+    if script is None:
         logger.warning(
             "Puppeteer bridge not installed — run: cd browser && npm install "
-            "(needed for fetch-html.ts / tsx)"
+            "(needed for fetch-html.ts)"
         )
         return None
 
@@ -113,8 +123,7 @@ def fetch_html_via_puppeteer(
             tmp_path = tf.name
 
         cmd: List[str] = [
-            str(tsx),
-            str(_TS_SCRIPT),
+            *script,
             "--url",
             url,
             "--cookies-file",
@@ -164,13 +173,8 @@ def puppeteer_eager_enabled() -> bool:
 
 def _run_bill_script(session: "requests.Session", args: List[str], label: str) -> Optional[List[str]]:
     """Run browser/src/fetch-bill-pdf.ts with the session's cookies; return stdout lines."""
-    script = _BROWSER_DIR / "src" / "fetch-bill-pdf.ts"
-    if not script.is_file():
-        logger.debug("Bill PDF script missing at %s", script)
-        return None
-
-    tsx = _tsx_binary()
-    if tsx is None:
+    script = _script_command("fetch-bill-pdf")
+    if script is None:
         logger.warning(
             "Puppeteer bridge not installed — run: cd browser && npm install "
             "(needed to fetch Duquesne bill PDFs for current EGS rate)"
@@ -191,7 +195,7 @@ def _run_bill_script(session: "requests.Session", args: List[str], label: str) -
             json.dump(cookies, tf)
             tmp_path = tf.name
 
-        cmd: List[str] = [str(tsx), str(script), "--cookies-file", tmp_path, *args]
+        cmd: List[str] = [*script, "--cookies-file", tmp_path, *args]
         proc = subprocess.run(
             cmd,
             cwd=str(_BROWSER_DIR),

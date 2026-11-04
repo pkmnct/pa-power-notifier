@@ -8,7 +8,8 @@
  * cookies-file: JSON array of { name, value, domain, path? } (Puppeteer cookie shape).
  * Single mode prints one JSON line: { billId, pdfPath, bytes }.
  * --all prints one JSON line per bill in the account's bill history:
- *   { billId, date, pdfPath, bytes } or { billId, date, skipped: true } for --skip-ids.
+ *   { billId, date, amountDue, pdfPath, bytes } or { billId, date, amountDue, skipped: true }
+ *   for --skip-ids.
  */
 import * as fs from "node:fs";
 import puppeteer from "puppeteer";
@@ -179,12 +180,16 @@ async function main(): Promise<void> {
         if (!row.Id) continue;
         const date = aspNetDate(row.Date);
         if (skipIds.has(row.Id)) {
-          process.stdout.write(JSON.stringify({ billId: row.Id, date, skipped: true }) + "\n");
+          process.stdout.write(
+            JSON.stringify({ billId: row.Id, date, amountDue: row.AmountDue, skipped: true }) + "\n",
+          );
           continue;
         }
         const dest = `${outDir}/${row.Id}.pdf`;
         const bytes = await downloadPdf(row.Id, dest);
-        process.stdout.write(JSON.stringify({ billId: row.Id, date, pdfPath: dest, bytes }) + "\n");
+        process.stdout.write(
+          JSON.stringify({ billId: row.Id, date, amountDue: row.AmountDue, pdfPath: dest, bytes }) + "\n",
+        );
       }
       return;
     }

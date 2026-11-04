@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from html import escape
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,9 @@ class RankedOption:
     is_current_egs: bool = False
     flags: List[str] = field(default_factory=list)
     tou_detail: str = ""
+    renewable: str = ""  # "100%" | "partial" (renewable, share not stated) | "none" | "" (not reported)
+    phone: str = ""
+    new_customers_only: bool = False
 
 
 @dataclass
@@ -65,6 +68,10 @@ class UtilitySection:
     lock_in_note: str = ""
     trend_note: str = ""
     seasonal_coverage_note: str = ""
+    # (category label, option) — best offer per category, for the summary block
+    highlights: List[Tuple[str, RankedOption]] = field(default_factory=list)
+    rate_alert: str = ""  # your own supply rate jumped on the latest bill
+    rate_alert_is_new: bool = False  # first report for this jump → email
 
 
 @dataclass
@@ -91,6 +98,8 @@ class CheckReport:
     def should_email(self) -> bool:
         if self.has_errors():
             return True
+        if any(sec and sec.rate_alert_is_new for sec in (self.electric, self.gas)):
+            return True
         if self.electric and (self.electric.recommend_switch or self.electric.tou_recommended):
             return True
         if self.gas and self.gas.recommend_switch:
@@ -99,6 +108,8 @@ class CheckReport:
 
     def email_subject(self) -> str:
         parts: List[str] = []
+        if any(sec and sec.rate_alert_is_new for sec in (self.electric, self.gas)):
+            parts.append("rate jump")
         if self.electric and self.electric.recommend_switch:
             parts.append("electric")
         if self.electric and self.electric.tou_recommended:
@@ -173,10 +184,34 @@ class CheckReport:
         return "".join(chunks)
 
 
+def _vs_stay(sec: UtilitySection, opt: RankedOption) -> str:
+    stay = sec.stay_option
+    if not stay or opt is stay or not sec.annual_units or stay.annual_supply_usd <= 0:
+        return ""
+    diff = stay.annual_supply_usd - opt.annual_supply_usd
+    return f"save ${diff:,.0f}/yr" if diff >= 0 else f"costs ${-diff:,.0f}/yr more"
+
+
+def _highlight_text(sec: UtilitySection, opt: RankedOption) -> str:
+    price = f"${opt.unit_price:.4f}/{sec.unit}" if opt.unit_price is not None else "n/a"
+    annual = f"${opt.annual_supply_usd:,.0f}/yr  " if sec.annual_units else ""
+    term = f", {opt.term_raw} mo" if opt.term_raw and opt.term_raw.strip().isdigit() else ""
+    fee = f", ${opt.monthly_fee:.2f}/mo fee" if opt.monthly_fee else ""
+    vs = _vs_stay(sec, opt)
+    phone = f"  ☎ {opt.phone}" if opt.phone else ""
+    return (
+        f"{annual}{price}  {opt.supplier} — {opt.plan_type}{term}{fee}"
+        + (f"  ({vs})" if vs else "")
+        + phone
+    )
+
+
 def _format_section_text(sec: UtilitySection) -> List[str]:
     label = sec.utility.upper()
     unit = sec.unit
     lines = [f"=== {label} ==="]
+    if sec.rate_alert:
+        lines.append(f"!! RATE ALERT   : {sec.rate_alert}")
     if sec.current_plan_label:
         lines.append(f"Current plan     : {sec.current_plan_label}")
     if sec.current_blended_rate is not None:
@@ -202,6 +237,11 @@ def _format_section_text(sec: UtilitySection) -> List[str]:
         lines.append(f"Projected annual : {sec.annual_units:,.0f} {unit}")
 
     lines.append("")
+    if sec.highlights:
+        lines.append("Best by category (annual supply $; vs staying):")
+        for label, opt in sec.highlights:
+            lines.append(f"  {label:<34} {_highlight_text(sec, opt)}")
+        lines.append("")
     if sec.annual_units:
         lines.append("Leaderboard (estimated annual supply $; fees included; lowest first):")
     else:
@@ -273,7 +313,13 @@ def _format_section_text(sec: UtilitySection) -> List[str]:
 
 
 def _format_section_html(sec: UtilitySection) -> List[str]:
-    chunks = [f"<h2>{_esc(sec.utility.title())}</h2><p>"]
+    chunks = [f"<h2>{_esc(sec.utility.title())}</h2>"]
+    if sec.rate_alert:
+        chunks.append(
+            "<p style='background:#fdecea;color:#b00020;padding:8px;border-radius:4px'>"
+            f"<strong>Rate alert:</strong> {_esc(sec.rate_alert)}</p>"
+        )
+    chunks.append("<p>")
     if sec.current_plan_label:
         chunks.append(f"Current plan: {_esc(sec.current_plan_label)}<br>")
     if sec.current_blended_rate is not None:
@@ -285,6 +331,25 @@ def _format_section_html(sec: UtilitySection) -> List[str]:
     if sec.seasonal_coverage_note:
         chunks.append(f"Seasonal coverage: {_esc(sec.seasonal_coverage_note)}<br>")
     chunks.append("</p>")
+
+    if sec.highlights:
+        chunks.append(
+            "<h3>Best by category</h3>"
+            "<table border='1' cellpadding='4' cellspacing='0' style='border-collapse:collapse'>"
+            "<tr><th>Category</th><th>Annual supply</th><th>Price</th><th>Supplier / plan</th>"
+            "<th>vs staying</th><th>Phone</th></tr>"
+        )
+        for label, opt in sec.highlights:
+            price = f"${opt.unit_price:.4f}/{_esc(sec.unit)}" if opt.unit_price is not None else "n/a"
+            annual = f"${opt.annual_supply_usd:,.0f}" if sec.annual_units else ""
+            term = f" ({_esc(opt.term_raw)} mo)" if opt.term_raw and opt.term_raw.strip().isdigit() else ""
+            chunks.append(
+                f"<tr><td>{_esc(label)}</td><td>{annual}</td><td>{price}</td>"
+                f"<td>{_esc(opt.supplier)} — {_esc(opt.plan_type)}{term}</td>"
+                f"<td>{_esc(_vs_stay(sec, opt))}</td><td>{_esc(opt.phone)}</td></tr>"
+            )
+        chunks.append("</table>")
+        chunks.append("<h3>Leaderboard</h3>")
 
     chunks.append(
         "<table border='1' cellpadding='4' cellspacing='0' style='border-collapse:collapse'>"

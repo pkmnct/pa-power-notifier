@@ -18,6 +18,11 @@ def load_dotenv_if_present() -> None:
     load_dotenv(env_path, override=False)
 
 
+def data_dir() -> Path:
+    """Root for all persisted data: DATA_DIR (the image sets /data), else <repo>/data."""
+    return Path(os.getenv("DATA_DIR") or Path(__file__).resolve().parent / "data")
+
+
 def _truthy_env(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
 

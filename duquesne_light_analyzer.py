@@ -132,7 +132,12 @@ class DuquesneLightAnalyzer:
             else os.getenv('DUQUESNE_CUSTOMER_URN')
         )
 
-        self.response_file = os.getenv('DUQUESNE_RESPONSE_FILE', 'response.json')
+        from env_bootstrap import data_dir
+
+        # Latest raw Opower response (debugging), and the input for DUQUESNE_USE_FILE
+        self.response_file = os.getenv(
+            'DUQUESNE_RESPONSE_FILE', str(data_dir() / 'duquesne_response.json')
+        )
         self.use_file = os.getenv('DUQUESNE_USE_FILE', 'false').lower() == 'true'
 
         # Shared session keeps DLC cookies alive across calls
@@ -1109,8 +1114,9 @@ class DuquesneLightAnalyzer:
                 bill_id = str(row.get("billId") or "")
                 if not bill_id:
                     continue
+                amount = {"amount_due_usd": row.get("amountDue")}
                 if row.get("skipped"):
-                    archive.set_bill_date(bill_id, row.get("date") or "")
+                    archive.fill_bill_meta(bill_id, row.get("date") or "", amount)
                     continue
                 text = self._bill_pdf_text(row.get("pdfPath") or "")
                 if text is None:
@@ -1123,6 +1129,7 @@ class DuquesneLightAnalyzer:
                     egs=egs,
                     bill_date=row.get("date") or meta["bill_date"],
                     supplier=egs.supplier if egs else "",
+                    details=amount,
                     update_latest=False,
                 )
                 added += 1
@@ -1159,7 +1166,9 @@ class DuquesneLightAnalyzer:
             import tempfile
             from pathlib import Path
 
-            data_dir = Path(__file__).resolve().parent / "data"
+            from env_bootstrap import data_dir as _data_dir
+
+            data_dir = _data_dir()
             data_dir.mkdir(parents=True, exist_ok=True)
             path = str(data_dir / "latest_bill.pdf")
             meta = fetch_duquesne_bill_pdf_via_puppeteer(

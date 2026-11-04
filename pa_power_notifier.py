@@ -7,6 +7,7 @@ Runs on a configurable interval; alerts via email when lower rates are available
 import os
 import csv
 import json
+import re
 import smtplib
 import time
 import requests
@@ -20,12 +21,12 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, unquote_plus
 
-_REPO_ROOT = Path(__file__).resolve().parent
+from env_bootstrap import data_dir
 
 
 def _default_data_file(name: str) -> str:
-    """Writable defaults for local runs; Docker Compose sets STORAGE_FILE etc. to /data/..."""
-    return str(_REPO_ROOT / "data" / name)
+    """Default path under DATA_DIR (<repo>/data locally, /data in the image)."""
+    return str(data_dir() / name)
 
 
 try:
@@ -131,6 +132,10 @@ class Rate:
     term_length: str
     utility_type: str  # 'electric' or 'gas'
     new_customers_offer: str = ''  # CSV "New Customers Offer": Yes = new customers only
+    # Electric-only CSV columns (PA Gas Switch has no renewable data)
+    renewable: str = ''  # "Renewable Energy": Yes / No
+    pa_wind: str = ''  # "PA wind": Yes / No
+    phone: str = ''  # "Contact Phone Number"
 
     def get_numeric_price(self) -> Optional[float]:
         try:
@@ -151,7 +156,9 @@ class Rate:
             cleaned = s.replace('$', '').replace(',', '').strip()
             parts = cleaned.split()
             if parts:
-                return float(parts[0])
+                fee = float(parts[0])
+                # e.g. "$1 per day"
+                return fee * 30.4 if 'day' in cleaned.lower() else fee
         except (ValueError, AttributeError):
             pass
         return 0.0
@@ -160,7 +167,24 @@ class Rate:
         val = self.cancellation_fee.strip().lower()
         return val not in ('', 'none', 'no', '$0', '0', 'n/a')
 
+    def renewable_tier(self) -> str:
+        """'100%', 'partial' or 'none' from the electric CSV; '' when not reported (gas)."""
+        flag = (self.renewable or '').strip().lower()
+        if flag == 'yes':
+            # "100%" counts only where it describes this plan, not an upsell like
+            # "Interested in upgrading to 100% green energy for an additional 3 cents?"
+            for sentence in re.split(r'(?<=[.!?])\s+', self.more_info or ''):
+                if re.search(r'100\s*%', sentence) and not re.search(r'upgrad|additional', sentence, re.I):
+                    return '100%'
+            return 'partial'
+        if flag == 'no':
+            return 'partial' if (self.pa_wind or '').strip().lower() == 'yes' else 'none'
+        return ''
+
     def is_renewable(self) -> bool:
+        tier = self.renewable_tier()
+        if tier:
+            return tier != 'none'
         keywords = ('green', 'renewable', 'solar', 'wind', 'clean')
         searchable = (self.type + self.supplier + self.discounts_incentives).lower()
         return any(k in searchable for k in keywords)
@@ -168,16 +192,15 @@ class Rate:
 
 class RateChecker:
     def __init__(self):
-        # Electric API — defaults match Duquesne residential RS for zip 15xxx shop URL:
+        # Electric API — required: ELECTRIC_ID + ELECTRIC_RATE_TYPE, or the shop results URL
+        # they come from (RateCSV returns nothing without a rate type), e.g.
         # https://www.papowerswitch.com/shop-for-rates-results/
-        #   ?zipcode=15xxx&serviceType=residential&distributor=1180
+        #   ?zipcode=…&serviceType=residential&distributor=1180
         #   &distributorrate=RS+-+Regular+Residential+Service
         self.electric_api_url = "https://www.papowerswitch.com/umbraco/Api/ShopApi/RateCSV"
-        self.electric_id = os.getenv("ELECTRIC_ID", "1180")
+        self.electric_id = os.getenv("ELECTRIC_ID", "").strip()
         self.electric_service_type = os.getenv("ELECTRIC_SERVICE_TYPE", "residential")
-        self.electric_rate_type = os.getenv(
-            "ELECTRIC_RATE_TYPE", "RS - Regular Residential Service"
-        )
+        self.electric_rate_type = os.getenv("ELECTRIC_RATE_TYPE", "").strip()
         self.electric_zipcode = os.getenv("ELECTRIC_ZIPCODE", "").strip()
 
         shop_url = os.getenv("ELECTRIC_SHOP_RESULTS_URL", "").strip()
@@ -194,14 +217,16 @@ class RateChecker:
 
         # Gas API
         self.gas_api_url = "https://www.pagasswitch.com/umbraco/Api/ShopApi/RateCSV"
-        self.gas_id = os.getenv('GAS_ID', '4423')
+        self.gas_id = os.getenv('GAS_ID', '').strip()
         self.gas_service_type = os.getenv('GAS_SERVICE_TYPE', 'residential')
         # ZIP for the PA Gas Switch shop page (Price to Compare + price unit)
         self.gas_zipcode = os.getenv('GAS_ZIPCODE', '').strip() or self.electric_zipcode
         # Manual fallbacks when the shop page can't be scraped. PA Gas Switch quotes
-        # offers in the utility's billing unit; Peoples (GAS_ID 4423) uses Mcf.
-        self.gas_price_unit = os.getenv('GAS_PRICE_UNIT', 'mcf').strip().lower()
+        # offers in the utility's billing unit (Mcf, ccf or therm, by utility).
+        self.gas_price_unit = os.getenv('GAS_PRICE_UNIT', '').strip().lower()
         self.gas_price_to_compare = float(os.getenv('GAS_PRICE_TO_COMPARE', '0') or 0)
+        # Raw RateCSV text from the latest fetch, kept for the market archive
+        self.last_offers_csv: Dict[str, str] = {}
 
         # Fallback current rates (overridden by scraper/analyzer when available)
         self.current_electric_price = float(os.getenv('CURRENT_ELECTRIC_PRICE', '0'))
@@ -414,7 +439,7 @@ class RateChecker:
 
         unit is the PA Gas Switch quoting unit for GAS_ID, so offers and PTC compare
         directly. price is None when neither the shop page nor GAS_PRICE_TO_COMPARE
-        provides one; unit then falls back to GAS_PRICE_UNIT.
+        provides one; unit then falls back to GAS_PRICE_UNIT, or "" if that's unset too.
         """
         if scrape_pagasswitch_price_to_compare is not None and self.gas_zipcode:
             try:
@@ -423,7 +448,7 @@ class RateChecker:
                     return got[0], got[1], "PA Gas Switch shop page"
             except Exception as e:
                 logger.debug("PA Gas Switch PTC scrape failed: %s", e)
-        unit = self.gas_price_unit if self.gas_price_unit in GAS_PRICE_UNITS else "mcf"
+        unit = self.gas_price_unit if self.gas_price_unit in GAS_PRICE_UNITS else ""
         if self.gas_price_to_compare > 0:
             return self.gas_price_to_compare, unit, "GAS_PRICE_TO_COMPARE"
         return None, unit, ""
@@ -485,6 +510,12 @@ class RateChecker:
     # ------------------------------------------------------------------
 
     def fetch_electric_rates(self) -> List[Rate]:
+        if not self.electric_id or not self.electric_rate_type:
+            logger.error(
+                "Set ELECTRIC_ID and ELECTRIC_RATE_TYPE, or ELECTRIC_SHOP_RESULTS_URL — "
+                "copy them from your papowerswitch.com shop results URL"
+            )
+            return []
         try:
             params = {
                 "id": self.electric_id,
@@ -499,6 +530,7 @@ class RateChecker:
             rates = self._only_service_type(
                 self._parse_csv(resp.text, 'electric'), self.electric_service_type
             )
+            self.last_offers_csv['electric'] = resp.text
 
             if self.include_duquesne_as_option:
                 ptc = self._cached_ptc()
@@ -527,12 +559,16 @@ class RateChecker:
             return []
 
     def fetch_gas_rates(self) -> List[Rate]:
+        if not self.gas_id:
+            logger.error("Set GAS_ID — the distributor id in your pagasswitch.com shop URL")
+            return []
         try:
             params = {'id': self.gas_id, 'servicetype': self.gas_service_type}
             logger.info("Fetching gas rates: %s", params)
             resp = requests.get(self.gas_api_url, params=params, timeout=30)
             resp.raise_for_status()
             rates = self._only_service_type(self._parse_csv(resp.text, 'gas'), self.gas_service_type)
+            self.last_offers_csv['gas'] = resp.text
             logger.info("Fetched %d gas rates", len(rates))
             return rates
         except Exception as e:
@@ -564,15 +600,20 @@ class RateChecker:
                 type=row.get('Type', ''),
                 cancellation_fee=row.get('Cancellation Fee', ''),
                 deposit_required=row.get('Deposit Required', ''),
-                discounts_incentives=row.get('Discounts/Incentives Available', ''),
-                introductory_price=row.get('Introductory price', ''),
-                monthly_fee=row.get('Monthly Fee', ''),
+                # Electric and gas CSVs name these columns differently
+                discounts_incentives=row.get('Discounts/Incentives Available')
+                or row.get('Discounts available?', ''),
+                introductory_price=row.get('Introductory price') or row.get('Introductory price?', ''),
+                monthly_fee=row.get('Monthly Fee') or row.get('Monthly service fee amount', ''),
                 more_info=row.get('More info', ''),
                 service_type=row.get('Service Type', ''),
                 term_end_date=row.get('Term End Date', ''),
                 term_length=row.get('Term Length', ''),
                 utility_type=utility_type,
                 new_customers_offer=row.get('New Customers Offer', ''),
+                renewable=row.get('Renewable Energy', ''),
+                pa_wind=row.get('PA wind', ''),
+                phone=row.get('Contact Phone Number', ''),
             )
             for row in reader
         ]
@@ -924,6 +965,12 @@ class RateChecker:
         print("\n" + "=" * 72)
         print(text)
         print("=" * 72 + "\n")
+        try:
+            from usage_archive import save_report
+
+            save_report(text, report.format_html())
+        except Exception as e:
+            logger.warning("Could not archive report: %s", e)
 
         if report.should_email():
             self.send_report_email(report)

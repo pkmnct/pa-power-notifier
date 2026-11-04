@@ -18,6 +18,7 @@ Key endpoints:
   POST /Portal/Compare-Spending.aspx/LoadData         → current + previous year usage
   POST /Portal/BillingHistory.aspx/LoadW2UIGridData   → bill amounts with date filter
   POST /Portal/BillDashboard.aspx/LoadBilling         → current balance + due date
+  POST /Portal/Common.aspx/GetEncryptedData + GET /Portal/BillPDF.aspx → bill PDF
 
 Notes:
   - usageyear param on LoadGasUsage is ignored by the server (always returns last 12 months)
@@ -29,6 +30,7 @@ Notes:
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -257,6 +259,45 @@ class PeoplesGasClient:
         """
         return self._post("/Portal/BillDashboard.aspx/LoadBilling", {}, "/Portal/BillDashboard.aspx")
 
+    def _account_number(self) -> Optional[str]:
+        # The billing grid reports AccountNumber "0"; BillPDF needs the real one, which the
+        # bill dashboard keeps in a hidden input.
+        if getattr(self, "_account_no", None) is None:
+            self._ensure_logged_in()
+            html = self.session.get(f"{BASE_URL}/BillDashboard.aspx", timeout=30).text
+            m = re.search(r'id="hdnAccountNumber" value="([^"]*)"', html)
+            self._account_no = m.group(1) if m else ""
+        return self._account_no or None
+
+    def fetch_bill_pdf(self, bill_row: dict) -> Optional[bytes]:
+        """
+        Download one bill's PDF. bill_row is a raw LoadW2UIGridData row (DBDate, InvoiceNumber).
+        Mirrors BillingHistory.js BillPdfClick: encrypt the query server-side, then GET BillPDF.aspx.
+        """
+        account = self._account_number()
+        if not account:
+            logger.warning("People's Gas account number not found on bill dashboard")
+            return None
+        query = (
+            f"AccountNo={account}&BillingDate={bill_row.get('DBDate', '')}"
+            f"&InvoiceNumber={bill_row.get('InvoiceNumber', '')}&ctype=inline"
+        )
+        enc = self._post(
+            "/Portal/Common.aspx/GetEncryptedData", {"data": query}, "/Portal/BillingHistory.aspx"
+        ).get("d")
+        if not enc:
+            return None
+        # Passed unencoded, as the portal's JS does; URL-encoding it makes BillPDF.aspx 500.
+        resp = self.session.get(f"{BASE_URL}/BillPDF.aspx?EncQuery={enc}&EncType=A", timeout=60)
+        if resp.content[:5] != b"%PDF-":
+            logger.warning(
+                "People's Gas bill %s did not return a PDF (%s)",
+                bill_row.get("InvoiceNumber"),
+                resp.headers.get("content-type"),
+            )
+            return None
+        return resp.content
+
 
 _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -267,6 +308,56 @@ _USER_AGENT = (
 # ---------------------------------------------------------------------------
 # Parsing helpers
 # ---------------------------------------------------------------------------
+
+def _pdf_text(path: str) -> str:
+    try:
+        import pdfplumber
+
+        with pdfplumber.open(path) as doc:
+            return "\n".join((p.extract_text() or "") for p in doc.pages)
+    except Exception as e:
+        logger.warning("Could not read People's Gas bill PDF: %s", e)
+        return ""
+
+
+def _parse_amount(value) -> Optional[float]:
+    m = re.search(r"-?[\d,]+\.?\d*", str(value or ""))
+    return float(m.group(0).replace(",", "")) if m else None
+
+
+def parse_bill_pdf_text(text: str) -> Dict:
+    """
+    Rates and usage from a People's Gas bill PDF. Its text extraction drops most spaces:
+
+      Commodity Charge$3.5000perMCF 4.90
+      YourPRICETOCOMPAREis$3.50perMCF.
+      MCFUsedin 30Days 1.4
+      Customer Charge-1Month $16.80
+      TotalCurrent Charges $40.00
+
+    supplier is "" on People's default service; a Natural Gas Supplier line names it otherwise.
+    """
+    flat = re.sub(r"\s+", "", text or "")
+
+    def num(pattern: str) -> Optional[float]:
+        m = re.search(pattern, flat, re.I)
+        return float(m.group(1).replace(",", "")) if m else None
+
+    supplier = ""
+    m = re.search(r"Natural\s*Gas\s*Supplier\s*[:\-]\s*([^\n$]+)", text or "", re.I)
+    if m and "please" not in m.group(1).lower():
+        supplier = m.group(1).strip()
+    return {
+        "supplier": supplier,
+        "price_to_compare_per_mcf": num(r"PRICETOCOMPAREis\$([\d.]+)perMCF"),
+        "commodity_per_mcf": num(r"CommodityCharge\$([\d.]+)perMCF"),
+        "capacity_per_mcf": num(r"CapacityCharge\$([\d.]+)perMCF"),
+        "mcf_used": num(r"MCFUsedin\d+Days([\d.]+)"),
+        "days": num(r"MCFUsedin(\d+)Days"),
+        "customer_charge_usd": num(r"CustomerCharge-?1Month\$([\d.]+)"),
+        "total_current_charges_usd": num(r"TotalCurrentCharges\$([\d,.]+)"),
+    }
+
 
 def _parse_usage_response(raw: dict) -> List[GasUsageData]:
     """
@@ -480,6 +571,45 @@ class PeoplesGasAnalyzer:
         bills = _parse_billing_history(raw)
         logger.info("Fetched %d billing records", len(bills))
         return bills
+
+    def backfill_bill_archive(self, archive) -> int:
+        """
+        Download every People's Gas bill PDF not yet in `archive` (a usage_archive.BillArchive)
+        with the commodity rate, Price to Compare and Mcf parsed from it. Returns bills added.
+        """
+        if self._use_file:
+            return 0
+        import tempfile
+
+        raw = self.client.fetch_billing_history()
+        d = raw.get("d") if isinstance(raw, dict) else None
+        rows = json.loads(d) if isinstance(d, str) else (d or [])
+        known = set(archive.known_ids())
+        added = 0
+        for row in rows:
+            invoice = str(row.get("InvoiceNumber") or "")
+            if row.get("Type") != "Bill" or not invoice or invoice in known:
+                continue
+            pdf = self.client.fetch_bill_pdf(row)
+            if not pdf:
+                continue
+            with tempfile.NamedTemporaryFile(suffix=".pdf") as tf:
+                tf.write(pdf)
+                tf.flush()
+                details = parse_bill_pdf_text(_pdf_text(tf.name))
+                details["amount_usd"] = _parse_amount(row.get("Amount"))
+                archive.archive_pdf(
+                    tf.name,
+                    invoice,
+                    bill_date=(row.get("DBDate") or "")[:10],
+                    supplier=details.pop("supplier", ""),
+                    details=details,
+                    update_latest=False,
+                )
+            added += 1
+        if added:
+            logger.info("Archived %d People's Gas bill PDFs", added)
+        return added
 
     def enrich_with_bills(self, usage: List[GasUsageData]) -> List[GasUsageData]:
         """Cross-reference usage records with bill amounts to compute effective rates."""

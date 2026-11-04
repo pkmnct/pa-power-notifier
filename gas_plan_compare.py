@@ -113,6 +113,9 @@ def run_report(top_n: int = 15, json_out: Optional[str] = None) -> Dict[str, Any
     )
 
     ptc, unit, ptc_source = checker.get_gas_price_to_compare()
+    if not unit:
+        logger.error("Unknown gas price unit — set GAS_ZIPCODE or GAS_PRICE_UNIT (mcf, ccf or therm)")
+        return {}
     annual_units = fc.annual_therms / therms_per_gas_unit(unit)
     gas_rates = checker.fetch_gas_rates()
     ranked = _rank_plans(gas_rates, annual_units, unit, checker)

@@ -53,17 +53,30 @@ except ImportError:
     TOUAnalyzer = None  # type: ignore
 
 try:
-    from supplier_history import ineligible_reason, prior_suppliers
+    from supplier_history import ineligible_reason, is_new_customer_offer, prior_suppliers
 except ImportError:
     ineligible_reason = None  # type: ignore
+    is_new_customer_offer = None  # type: ignore
     prior_suppliers = None  # type: ignore
 
 try:
-    from usage_archive import BillArchive, DailyElectricUsageStore, GasUsageStore
+    from usage_archive import (
+        BillArchive,
+        DailyElectricUsageStore,
+        GasUsageStore,
+        MarketArchive,
+        gas_bill_archive_dir,
+    )
 except ImportError:
     DailyElectricUsageStore = None  # type: ignore
     GasUsageStore = None  # type: ignore
     BillArchive = None  # type: ignore
+    MarketArchive = None  # type: ignore
+
+try:
+    from peoples_gas_analyzer import PeoplesGasAnalyzer
+except ImportError:
+    PeoplesGasAnalyzer = None  # type: ignore
 
 try:
     from gas_usage_forecast import (
@@ -445,7 +458,82 @@ def rate_to_option(rate: Any, annual_usd: float, unit: str) -> RankedOption:
         more_info=getattr(rate, "more_info", "") or "",
         is_utility_default=is_default,
         flags=flags,
+        renewable=rate.renewable_tier() if hasattr(rate, "renewable_tier") else "",
+        phone=getattr(rate, "phone", "") or "",
+        new_customers_only=bool(is_new_customer_offer and is_new_customer_offer(rate)),
     )
+
+
+def tou_shift_option(
+    result: Any, tou_rates: Any, annual_kwh: float, shift: float
+) -> Optional[RankedOption]:
+    """TOU cost if `shift` of peak kWh moved to super off-peak (EV charging, pre-cooling)."""
+    total = result.total_kwh or 0.0
+    if total <= 0 or annual_kwh <= 0:
+        return None
+    peak = result.peak_kwh * (1 - shift)
+    super_off = result.super_off_peak_kwh + result.peak_kwh * shift
+    effective = (
+        peak * tou_rates.peak_rate
+        + result.off_peak_kwh * tou_rates.off_peak_rate
+        + super_off * tou_rates.super_off_peak_rate
+    ) / total
+    return RankedOption(
+        supplier="Duquesne Light",
+        plan_type=f"Time-of-Use, {shift:.0%} of peak shifted overnight",
+        unit="kWh",
+        annual_supply_usd=round(annual_kwh * effective, 2),
+        unit_price=effective,
+        term_raw="Tariff / pilot",
+        is_tou=True,
+    )
+
+
+def best_by_category(
+    ranked: List[RankedOption],
+    utility: str,
+    season_months: int = 12,
+    extras: Sequence[Tuple[str, Optional[RankedOption]]] = (),
+) -> List[Tuple[str, RankedOption]]:
+    """
+    Cheapest option per category for the report summary. `ranked` holds offers you're
+    eligible for (filters applied); extras are pre-built rows (TOU variants, offers the
+    filters removed) appended as given.
+    """
+    market = [o for o in ranked if not (o.is_current_egs or o.is_tou or o.is_utility_default)]
+
+    def cheapest(pred) -> Optional[RankedOption]:
+        hits = [o for o in market if pred(o)]
+        return min(hits, key=lambda o: o.annual_supply_usd) if hits else None
+
+    def kind(o: RankedOption) -> str:
+        return (o.plan_type or "").strip().lower()
+
+    rows: List[Tuple[str, Optional[RankedOption]]] = [
+        ("Best overall", cheapest(lambda o: True)),
+        ("Best new-customer offer", cheapest(lambda o: o.new_customers_only)),
+        ("Best open to existing customers", cheapest(lambda o: not o.new_customers_only)),
+        ("Best fixed", cheapest(lambda o: kind(o).startswith("fixed"))),
+        (
+            f"Best fixed ≥{season_months} mo",
+            cheapest(lambda o: kind(o).startswith("fixed") and (o.term_months or 0) >= season_months),
+        ),
+        ("Best variable", cheapest(lambda o: kind(o).startswith("variable"))),
+    ]
+    if utility == "electric":
+        rows += [
+            ("Best 100% renewable", cheapest(lambda o: o.renewable == "100%")),
+            ("Best renewable, share not stated", cheapest(lambda o: o.renewable == "partial")),
+            ("Best non-renewable", cheapest(lambda o: o.renewable == "none")),
+        ]
+    default = next((o for o in ranked if o.is_utility_default), None)
+    if default is not None:
+        rows.append(("Utility default (Price to Compare)", default))
+    tou = next((o for o in ranked if o.is_tou), None)
+    if tou is not None:
+        rows.append(("Time-of-Use (your usage)", tou))
+    rows += list(extras)
+    return [(label, opt) for label, opt in rows if opt is not None]
 
 
 def rank_plans_by_annual(rates: Sequence[Any], annual_units: float, unit: str) -> List[RankedOption]:
@@ -713,6 +801,64 @@ def _electric_supplier_history(checker: Any, report: CheckReport) -> List[dict]:
     return history
 
 
+def own_rate_alert(rate_history: List[dict], threshold_pct: float) -> Optional[Tuple[str, str]]:
+    """
+    (message, bill_id) when the newest bill's supply rate is threshold_pct above the bill
+    before it — the classic variable-rate creep. None otherwise.
+    """
+    if len(rate_history) < 2:
+        return None
+    prev, last = rate_history[-2], rate_history[-1]
+    if prev["rate"] <= 0:
+        return None
+    pct = 100.0 * (last["rate"] - prev["rate"]) / prev["rate"]
+    if pct < threshold_pct:
+        return None
+    same = prev["supplier"] == last["supplier"]
+    return (
+        f"Your supply rate rose {pct:.0f}%: ${prev['rate']:.4f}/kWh (bill {prev['bill_date']}) → "
+        f"${last['rate']:.4f}/kWh (bill {last['bill_date']})"
+        + (f" with {last['supplier']} — typical of a variable rate resetting." if same else "."),
+        last["bill_id"],
+    )
+
+
+def _rate_alert_is_new(utility: str, bill_id: str) -> bool:
+    """True the first time a jump on bill_id is reported; remembered in DATA_DIR/rate_alerts.json."""
+    from env_bootstrap import data_dir
+
+    path = data_dir() / "rate_alerts.json"
+    try:
+        seen = json.loads(path.read_text()) if path.is_file() else {}
+    except Exception:
+        seen = {}
+    if seen.get(utility) == bill_id:
+        return False
+    seen[utility] = bill_id
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(seen, indent=2))
+    except Exception as e:
+        logger.warning("Could not record rate alert: %s", e)
+    return True
+
+
+def _backfill_gas_bills(report: CheckReport) -> None:
+    """Download any People's Gas bill PDFs not yet archived."""
+    if PeoplesGasAnalyzer is None or BillArchive is None:
+        return
+    if not os.getenv("PEOPLES_GAS_USERNAME") or os.getenv("BILL_HISTORY_BACKFILL", "1").strip().lower() in (
+        "0", "false", "no", "off",
+    ):
+        return
+    try:
+        added = PeoplesGasAnalyzer().backfill_bill_archive(BillArchive(gas_bill_archive_dir()))
+        if added:
+            report.add_warning("info", "gas", f"Archived {added} People's Gas bill PDF(s).")
+    except Exception as e:
+        report.add_warning("warning", "gas", f"People's Gas bill backfill failed: {e}")
+
+
 def _drop_ineligible(rates: list, history: list, report: CheckReport, utility: str) -> list:
     """Remove new-customer-only offers from suppliers you've already used."""
     if ineligible_reason is None or not history:
@@ -836,10 +982,22 @@ def build_check_report(checker: Any) -> CheckReport:
     electric_rates = checker.fetch_electric_rates()
     gas_rates = checker.fetch_gas_rates()
 
+    market = MarketArchive() if MarketArchive is not None else None
+    if market is not None:
+        for utility, csv_text in (getattr(checker, "last_offers_csv", None) or {}).items():
+            market.save_offers_csv(utility, csv_text)
+
     if not electric_rates:
-        report.add_warning("error", "papowerswitch", "No electric rates returned from PA Power Switch CSV.")
+        report.add_warning(
+            "error",
+            "papowerswitch",
+            "No electric offers from PA Power Switch — check ELECTRIC_ID and ELECTRIC_RATE_TYPE "
+            "(or ELECTRIC_SHOP_RESULTS_URL).",
+        )
     if not gas_rates:
-        report.add_warning("error", "pagasswitch", "No gas rates returned from PA Gas Switch CSV.")
+        report.add_warning(
+            "error", "pagasswitch", "No gas offers from PA Gas Switch — check GAS_ID."
+        )
     if current_electric <= 0 and not (egs and egs.supply_rate_per_kwh > 0):
         report.add_warning(
             "error",
@@ -887,12 +1045,18 @@ def build_check_report(checker: Any) -> CheckReport:
             except Exception as e:
                 logger.debug("Bill archive safety-net skipped: %s", e)
     else:
+        # With a login configured, a missing bill means the Duquesne fetch broke — the
+        # savings below are then measured against default service, not what you pay.
         report.add_warning(
-            "warning",
+            "error" if os.getenv("DUQUESNE_USERNAME") else "warning",
             "duquesne",
-            "Could not read current EGS from bill PDF — stay baseline may use PTC/flat DSS "
-            "instead of your actual supplier rate. Need Puppeteer + login for DisplayBillPdf.",
+            "Could not read your current supplier and rate from the latest Duquesne bill — "
+            "savings below are vs Duquesne default service, not your actual rate. "
+            "Check the Duquesne login and Puppeteer/Chrome.",
         )
+
+    if market is not None and ptc:
+        market.log_price_to_compare("electric", ptc, "kWh", "Duquesne bill / rates page")
 
     supply_ref = current_supply or ptc
     if current_electric > 0 and not supply_ref and not current_supply:
@@ -957,16 +1121,17 @@ def build_check_report(checker: Any) -> CheckReport:
         if blended:
             elec_section.current_blended_rate = blended
 
-    filtered_e = checker.apply_filters(electric_rates)
-    if electric_rates and not filtered_e:
-        report.add_warning("warning", "electric", "Filters removed every electric offer.")
+    eligible_e = electric_rates
     if prior_suppliers is not None:
         elec_history = prior_suppliers(
             "electric",
             _electric_supplier_history(checker, report),
             current_supplier=egs.supplier if egs else "",
         )
-        filtered_e = _drop_ineligible(filtered_e, elec_history, report, "electric")
+        eligible_e = _drop_ineligible(electric_rates, elec_history, report, "electric")
+    filtered_e = checker.apply_filters(eligible_e)
+    if eligible_e and not filtered_e:
+        report.add_warning("warning", "electric", "Filters removed every electric offer.")
     ranked_e: List[RankedOption] = []
     if annual_kwh > 0:
         ranked_e = rank_plans_by_annual(filtered_e, annual_kwh, "kWh")
@@ -1076,6 +1241,28 @@ def build_check_report(checker: Any) -> CheckReport:
     elec_section.savings_pct = pct_e
     elec_section.savings_annual_usd = sav_e
     elec_section.lock_in_note = lock_in_note("electric", rec_e, stay_e, switch_e)
+    extras_e: List[Tuple[str, Optional[RankedOption]]] = []
+    if tou_result is not None and annual_kwh > 0:
+        for shift in (0.25, 0.5):
+            extras_e.append(
+                (f"TOU, shift {shift:.0%} of peak", tou_shift_option(tou_result, tou_rates, annual_kwh, shift))
+            )
+    if annual_kwh > 0 and len(filtered_e) < len(eligible_e):
+        removed = [r for r in eligible_e if r not in filtered_e]
+        best_removed = rank_plans_by_annual(removed, annual_kwh, "kWh")
+        best_kept = min((o.annual_supply_usd for o in ranked_e if not o.is_current_egs), default=None)
+        if best_removed and (best_kept is None or best_removed[0].annual_supply_usd < best_kept):
+            extras_e.append(("Best your filters removed", best_removed[0]))
+    elec_section.highlights = best_by_category(ranked_e, "electric", extras=extras_e)
+    if BillArchive is not None:
+        jump = own_rate_alert(
+            BillArchive(getattr(checker, "bill_archive_dir", None)).supply_rate_history(),
+            float(os.getenv("RATE_JUMP_ALERT_PCT") or "10"),
+        )
+        if jump:
+            elec_section.rate_alert = jump[0]
+            elec_section.rate_alert_is_new = _rate_alert_is_new("electric", jump[1])
+            report.add_warning("warning", "electric", jump[0])
     elec_section.trend_note = trend_note(prior_history, "electric", ranked_e[0] if ranked_e else None)
     report.electric = elec_section
 
@@ -1083,7 +1270,18 @@ def build_check_report(checker: Any) -> CheckReport:
     # supply-only Price to Compare as the stay baseline — the bill-derived rate includes
     # delivery charges that don't change when you switch suppliers.
     gas_ptc, gas_unit, gas_ptc_source = checker.get_gas_price_to_compare()
+    if not gas_unit:
+        report.add_warning(
+            "error",
+            "gas",
+            "Unknown gas price unit — set GAS_ZIPCODE (read from the PA Gas Switch shop page) or "
+            "GAS_PRICE_UNIT (mcf, ccf or therm). Ranking as $/therm, which may be wrong.",
+        )
+        gas_unit = "therm"
     therms_per_unit = therms_per_gas_unit(gas_unit) if therms_per_gas_unit else 1.0
+    if market is not None and gas_ptc:
+        market.log_price_to_compare("gas", gas_ptc, gas_unit, gas_ptc_source)
+    _backfill_gas_bills(report)
     if gas_ptc:
         report.add_warning(
             "info", "gas", f"Supply Price to Compare ${gas_ptc:.4f}/{gas_unit} (from {gas_ptc_source})"
@@ -1151,12 +1349,13 @@ def build_check_report(checker: Any) -> CheckReport:
         if gas_unit == "ccf":
             gas_section.usage_summary += f" = {annual_gas_units:,.1f} {gas_unit}/yr"
 
-    filtered_g = checker.apply_filters(gas_rates)
-    if gas_rates and not filtered_g:
-        report.add_warning("warning", "gas", "Filters removed every gas offer.")
+    eligible_g = gas_rates
     if prior_suppliers is not None:
         # No supplier on People's bills to read; PRIOR_GAS_SUPPLIERS covers past suppliers.
-        filtered_g = _drop_ineligible(filtered_g, prior_suppliers("gas"), report, "gas")
+        eligible_g = _drop_ineligible(gas_rates, prior_suppliers("gas"), report, "gas")
+    filtered_g = checker.apply_filters(eligible_g)
+    if eligible_g and not filtered_g:
+        report.add_warning("warning", "gas", "Filters removed every gas offer.")
     ranked_g: List[RankedOption] = []
     if annual_gas_units > 0:
         ranked_g = rank_plans_by_annual(filtered_g, annual_gas_units, gas_unit)
@@ -1198,6 +1397,13 @@ def build_check_report(checker: Any) -> CheckReport:
     gas_section.savings_pct = pct_g
     gas_section.savings_annual_usd = sav_g
     gas_section.lock_in_note = lock_in_note("gas", rec_g, stay_g, switch_g)
+    extras_g: List[Tuple[str, Optional[RankedOption]]] = []
+    if annual_gas_units > 0 and len(filtered_g) < len(eligible_g):
+        removed = rank_plans_by_annual([r for r in eligible_g if r not in filtered_g], annual_gas_units, gas_unit)
+        best_kept = min((o.annual_supply_usd for o in ranked_g if not o.is_current_egs), default=None)
+        if removed and (best_kept is None or removed[0].annual_supply_usd < best_kept):
+            extras_g.append(("Best your filters removed", removed[0]))
+    gas_section.highlights = best_by_category(ranked_g, "gas", extras=extras_g)
     gas_section.trend_note = trend_note(prior_history, "gas", ranked_g[0] if ranked_g else None)
     report.gas = gas_section
 

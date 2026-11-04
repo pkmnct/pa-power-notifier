@@ -9,7 +9,8 @@ We combine:
   - optional straight average (simple sanity check).
 
 Env:
-  THERMS_PER_MCF — conversion for PA commerce (default 10.37, typical PNG territory).
+  THERMS_PER_MCF — heat content of your gas (default 10.37, typical for Pennsylvania;
+                   your bill may list a BTU factor).
 """
 
 from __future__ import annotations
