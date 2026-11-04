@@ -190,6 +190,60 @@ class Rate:
         return any(k in searchable for k in keywords)
 
 
+def _email_state_path():
+    from env_bootstrap import data_dir
+
+    return data_dir() / "last_email.json"
+
+
+def _email_state_changed(report) -> bool:
+    """
+    EMAIL_MODE=change (default): True when the report's findings differ from the last
+    email, a new rate jump is reported, or EMAIL_REMIND_DAYS have passed since the last
+    email. EMAIL_MODE=daily: always True.
+    """
+    if os.getenv("EMAIL_MODE", "change").strip().lower() == "daily":
+        return True
+    if any(sec and sec.rate_alert_is_new for sec in (report.electric, report.gas)):
+        return True
+    path = _email_state_path()
+    try:
+        last = json.loads(path.read_text()) if path.is_file() else None
+    except Exception:
+        last = None
+    if not last or last.get("fingerprint") != report.email_fingerprint():
+        return True
+    try:
+        remind_days = float(os.getenv("EMAIL_REMIND_DAYS") or "0")
+    except ValueError:
+        remind_days = 0
+    if remind_days > 0:
+        try:
+            sent = datetime.fromisoformat(last.get("sent_at", ""))
+            return (datetime.now() - sent).total_seconds() >= remind_days * 86400
+        except ValueError:
+            return True
+    return False
+
+
+def _record_email_state(report) -> None:
+    path = _email_state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "sent_at": datetime.now().isoformat(timespec="seconds"),
+                    "subject": report.email_subject(),
+                    "fingerprint": report.email_fingerprint(),
+                },
+                indent=2,
+            )
+        )
+    except Exception as e:
+        logger.warning("Could not record email state: %s", e)
+
+
 class RateChecker:
     def __init__(self):
         # Electric API — required: ELECTRIC_ID + ELECTRIC_RATE_TYPE, or the shop results URL
@@ -780,12 +834,20 @@ class RateChecker:
     # Notifications
     # ------------------------------------------------------------------
 
-    def send_report_email(self, report) -> None:
-        """One multipart (plain + HTML) email for the unified check report."""
+    def send_report_email(self, report, force: bool = False) -> None:
+        """
+        One multipart (plain + HTML) email for the unified check report.
+
+        With EMAIL_MODE=change (default) it is skipped when the findings match the last
+        email sent; force=True sends anyway.
+        """
         if not all([self.smtp_host, self.smtp_username, self.smtp_password, self.notify_to]):
             logger.debug("Email not configured — skipping notification")
             return
         if not report.should_email():
+            return
+        if not force and not _email_state_changed(report):
+            logger.info("No email: findings unchanged since the last email (EMAIL_MODE=change)")
             return
 
         try:
@@ -803,6 +865,7 @@ class RateChecker:
                 server.send_message(msg)
 
             logger.info("Email sent to %s", self.notify_to)
+            _record_email_state(report)
         except Exception as e:
             logger.error("Failed to send email: %s", e)
 
@@ -843,6 +906,7 @@ class RateChecker:
                 server.login(self.smtp_username, self.smtp_password)
                 server.send_message(msg)
             logger.info("Email sent to %s", self.notify_to)
+            _record_email_state(report)
         except Exception as e:
             logger.error("Failed to send email: %s", e)
 

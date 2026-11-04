@@ -106,6 +106,34 @@ class CheckReport:
             return True
         return False
 
+    def email_fingerprint(self) -> dict:
+        """
+        What the email is about, for "only email on change" (EMAIL_MODE=change).
+
+        Covers each utility's verdict and recommended offer (price rounded so small
+        variable-rate wiggles don't re-trigger) and the set of error messages.
+        New rate jumps are tracked separately and always email.
+        """
+        fp: dict = {"errors": sorted(w.line() for w in self.warnings if w.level == "error")}
+        for sec in (self.electric, self.gas):
+            if sec is None:
+                continue
+            rec = sec.recommended if sec.recommend_switch else None
+            places = 3 if sec.utility == "electric" else 2  # 0.1¢/kWh; 1¢ per gas unit
+            fp[sec.utility] = {
+                "switch": sec.recommend_switch,
+                "tou": sec.tou_recommended,
+                "offer": None
+                if rec is None
+                else [
+                    rec.supplier,
+                    rec.plan_type,
+                    rec.term_months,
+                    None if rec.unit_price is None else round(rec.unit_price, places),
+                ],
+            }
+        return fp
+
     def email_subject(self) -> str:
         parts: List[str] = []
         if any(sec and sec.rate_alert_is_new for sec in (self.electric, self.gas)):
@@ -149,7 +177,10 @@ class CheckReport:
             lines.append("")
 
         if self.should_email():
-            lines.append("Email trigger: switch recommendation and/or error-level data issues.")
+            lines.append(
+                "Email trigger: switch recommendation, new rate jump and/or error-level data issues"
+                " (with EMAIL_MODE=change, only when that changes since the last email)."
+            )
         else:
             lines.append("Email trigger: none (no switch above threshold, TOU not recommended, no errors).")
         return "\n".join(lines).rstrip() + "\n"

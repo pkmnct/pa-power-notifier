@@ -70,6 +70,8 @@ services:
       - NOTIFICATION_THRESHOLD=${NOTIFICATION_THRESHOLD:-5.0}
       # Email once when your own supply rate rises this % between bills (variable-rate jumps)
       - RATE_JUMP_ALERT_PCT=${RATE_JUMP_ALERT_PCT:-10}
+      - EMAIL_MODE=${EMAIL_MODE:-change}
+      - EMAIL_REMIND_DAYS=${EMAIL_REMIND_DAYS:-0}
 
       # ── Rate filters ────────────────────────────────────────────────────────
       # Set to "true" to exclude plans with a cancellation fee

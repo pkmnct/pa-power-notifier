@@ -83,6 +83,8 @@ Search your ZIP on [papowerswitch.com](https://www.papowerswitch.com), pick your
 | `FILTER_NO_CANCELLATION_FEE` | `false` | Skip offers with a cancellation fee |
 | `FILTER_RENEWABLE_ONLY` | `false` | Only renewable offers |
 | `RATE_JUMP_ALERT_PCT` | `10` | Email once when your supply rate rises this much between bills |
+| `EMAIL_MODE` | `change` | `change`: email only when the verdict, recommended offer or errors differ from the last email (new rate jumps always email). `daily`: email every run that has something to report |
+| `EMAIL_REMIND_DAYS` | `0` | With `EMAIL_MODE=change`, resend an unchanged alert after this many days (0 = never) |
 | `PRIOR_ELECTRIC_SUPPLIERS`, `PRIOR_GAS_SUPPLIERS` | | Suppliers used before your oldest archived bill, `Name@YYYY-MM-DD; Other Name`, so their new-customer-only offers are skipped |
 | `INCLUDE_DUQUESNE_AS_OPTION` | `true` | List Duquesne's default service (Price to Compare) as an option |
 
@@ -109,7 +111,7 @@ Everything persists under `DATA_DIR` (`/data` in the image, `./data/` locally). 
 | `market/electric/`, `market/gas/` | The full PA Power/Gas Switch offer list, one CSV per day |
 | `market/price_to_compare.jsonl` | Default-service prices over time |
 | `reports/` | Every run's report (`.txt` and `.html`) |
-| `previous_rates.json`, `rate_alerts.json`, `tou_rates.json` | Run state |
+| `previous_rates.json`, `rate_alerts.json`, `last_email.json`, `tou_rates.json` | Run state |
 
 Single paths can be overridden (`HOURLY_USAGE_FILE`, `BILL_ARCHIVE_DIR`, `GAS_BILL_ARCHIVE_DIR`, `MARKET_ARCHIVE_DIR`, `REPORT_ARCHIVE_DIR`, `STORAGE_FILE`, …). Set `BILL_HISTORY_BACKFILL=0` to stop downloading older bills.
 
