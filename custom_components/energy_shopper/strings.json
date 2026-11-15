@@ -2,6 +2,13 @@
   "config": {
     "step": {
       "user": {
+        "title": "What to shop for",
+        "menu_options": {
+          "gas": "Gas supplier offers (PA Gas Switch)",
+          "electric": "Electric supplier offers (PA Power Switch)"
+        }
+      },
+      "gas": {
         "title": "Gas market",
         "description": "Search your ZIP on pagasswitch.com and copy the `distributor=` number from the results page URL.",
         "data": {
@@ -30,16 +37,51 @@
           "current_rate_entity": "A sensor in USD per Mcf, ccf or therm, such as Peoples Gas Price to Compare. Takes precedence over a typed rate.",
           "prior_suppliers": "Semicolon-separated, optionally with the date you left: `Name@YYYY-MM-DD; Other Name`. Their new-customer-only offers are skipped."
         }
+      },
+      "electric": {
+        "title": "Electric market",
+        "description": "Search your ZIP on papowerswitch.com, pick your utility and rate class, and paste the results page URL here. It carries the distributor, rate class and ZIP.",
+        "data": {
+          "shop_url": "PA Power Switch results URL"
+        }
+      },
+      "electric_settings": {
+        "title": "Your usage and rate",
+        "description": "Pick your hourly electricity statistic (for example the Duquesne Light collector's consumption) and where your supplier, supply rate and the utility's Price to Compare come from. Hourly data also lets Time-of-Use be scored when you enter its rates.",
+        "data": {
+          "usage_statistic": "Electricity usage statistic",
+          "current_supplier_entity": "Current supplier sensor",
+          "current_supplier": "Current supplier",
+          "current_rate_entity": "Current supply rate sensor",
+          "current_rate_value": "Current supply rate",
+          "price_to_compare_entity": "Price to Compare sensor",
+          "price_to_compare_value": "Price to Compare",
+          "renewable_only": "Only renewable offers",
+          "tou_peak_cents": "Time-of-Use peak rate",
+          "tou_off_peak_cents": "Time-of-Use off-peak rate",
+          "tou_super_off_peak_cents": "Time-of-Use super off-peak rate",
+          "threshold_pct": "Recommend switching at savings of at least",
+          "no_cancellation_fee": "Skip offers with a cancellation fee",
+          "prior_suppliers": "Suppliers you've used before"
+        },
+        "data_description": {
+          "current_supplier_entity": "A sensor whose state is your supplier's name, such as the Duquesne collector's Electric supplier. Blank or \"default service\" means you're on the utility's default supply.",
+          "current_rate_entity": "A sensor in USD/kWh (or ¢/kWh), such as the Duquesne collector's Electric supply rate.",
+          "price_to_compare_entity": "The utility's default supply price, such as the Duquesne collector's Electric Price to Compare.",
+          "tou_peak_cents": "From the utility's Time-of-Use tariff, in ¢/kWh. Leave the three blank to skip Time-of-Use. They change each Jun 1 and Dec 1.",
+          "prior_suppliers": "Semicolon-separated, optionally with the date you left: `Name@YYYY-MM-DD; Other Name`. Your current supplier counts automatically."
+        }
       }
     },
     "error": {
       "cannot_connect": "Couldn't reach PA Gas Switch.",
       "no_offers": "PA Gas Switch lists no offers for that distributor and service type.",
       "unknown_unit": "PA Gas Switch didn't show a Price to Compare for this ZIP and distributor, so the price unit is unknown. Pick it here.",
-      "unknown": "Unexpected error."
+      "unknown": "Unexpected error.",
+      "invalid_shop_url": "That URL has no distributor or rate class. Use the PA Power Switch results page after picking your utility and rate class."
     },
     "abort": {
-      "already_configured": "This gas market is already set up."
+      "already_configured": "This market is already set up."
     }
   },
   "options": {
@@ -57,31 +99,113 @@
           "rate_jump_pct": "Flag a rise in your rate of at least",
           "therms_per_mcf": "Heat content (therms per Mcf)"
         }
+      },
+      "electric": {
+        "title": "Energy Shopper settings",
+        "data": {
+          "usage_statistic": "Electricity usage statistic",
+          "current_supplier_entity": "Current supplier sensor",
+          "current_supplier": "Current supplier",
+          "current_rate_entity": "Current supply rate sensor",
+          "current_rate_value": "Current supply rate",
+          "price_to_compare_entity": "Price to Compare sensor",
+          "price_to_compare_value": "Price to Compare",
+          "renewable_only": "Only renewable offers",
+          "tou_peak_cents": "Time-of-Use peak rate",
+          "tou_off_peak_cents": "Time-of-Use off-peak rate",
+          "tou_super_off_peak_cents": "Time-of-Use super off-peak rate",
+          "threshold_pct": "Recommend switching at savings of at least",
+          "no_cancellation_fee": "Skip offers with a cancellation fee",
+          "prior_suppliers": "Suppliers you've used before",
+          "rate_jump_pct": "Flag a rise in your rate of at least"
+        }
       }
     }
   },
   "selector": {
     "price_unit": {
-      "options": { "mcf": "Mcf", "ccf": "ccf", "therm": "therm" }
+      "options": {
+        "mcf": "Mcf",
+        "ccf": "ccf",
+        "therm": "therm"
+      }
     },
     "service_type": {
-      "options": { "residential": "Residential", "commercial": "Commercial" }
+      "options": {
+        "residential": "Residential",
+        "commercial": "Commercial"
+      }
     }
   },
   "entity": {
     "sensor": {
       "gas_recommendation": {
         "name": "Gas recommendation",
-        "state": { "switch": "Switch", "stay": "Stay", "unknown": "Unknown" }
+        "state": {
+          "switch": "Switch",
+          "stay": "Stay",
+          "unknown": "Unknown"
+        }
       },
-      "gas_best_offer": { "name": "Best gas offer" },
-      "gas_best_offer_price": { "name": "Best gas offer price" },
-      "gas_annual_savings": { "name": "Gas annual savings" },
-      "gas_savings_percent": { "name": "Gas savings" },
-      "gas_current_rate": { "name": "Current gas supply rate" },
-      "gas_price_to_compare": { "name": "Gas Price to Compare" },
-      "gas_annual_usage": { "name": "Projected annual gas use" },
-      "gas_offers": { "name": "Gas offers ranked" }
+      "gas_best_offer": {
+        "name": "Best gas offer"
+      },
+      "gas_best_offer_price": {
+        "name": "Best gas offer price"
+      },
+      "gas_annual_savings": {
+        "name": "Gas annual savings"
+      },
+      "gas_savings_percent": {
+        "name": "Gas savings"
+      },
+      "gas_current_rate": {
+        "name": "Current gas supply rate"
+      },
+      "gas_price_to_compare": {
+        "name": "Gas Price to Compare"
+      },
+      "gas_annual_usage": {
+        "name": "Projected annual gas use"
+      },
+      "gas_offers": {
+        "name": "Gas offers ranked"
+      },
+      "electric_recommendation": {
+        "name": "Electric recommendation",
+        "state": {
+          "switch": "Switch",
+          "stay": "Stay",
+          "unknown": "Unknown"
+        }
+      },
+      "electric_best_offer": {
+        "name": "Best electric offer"
+      },
+      "electric_best_offer_price": {
+        "name": "Best electric offer price"
+      },
+      "electric_annual_savings": {
+        "name": "Electric annual savings"
+      },
+      "electric_savings_percent": {
+        "name": "Electric savings"
+      },
+      "electric_current_rate": {
+        "name": "Current electric supply rate"
+      },
+      "electric_price_to_compare": {
+        "name": "Electric Price to Compare"
+      },
+      "electric_annual_usage": {
+        "name": "Projected annual electricity use"
+      },
+      "electric_offers": {
+        "name": "Electric offers ranked"
+      },
+      "electric_time_of_use": {
+        "name": "Time-of-Use annual savings"
+      }
     }
   },
   "issues": {
@@ -92,6 +216,18 @@
     "gas_rate_jump": {
       "title": "Your gas supply rate rose {pct}%",
       "description": "Your supply rate went from ${old}/{unit} (on {old_date}) to ${new}/{unit}. Variable rates often reset like this; the Energy Shopper sensors show whether another offer is cheaper now."
+    },
+    "cheaper_electric_supplier": {
+      "title": "Cheaper electric supplier: {supplier}",
+      "description": "{supplier} ({plan}, {term}) is ${price}/kWh against your ${baseline}/kWh, about ${savings} a year ({pct}%) less on your usage.\n\nTo switch, call {phone} or use the PA Power Switch listing. Check the term, any cancellation fee and whether the price is introductory before signing.\n\nThis goes away on its own when the offer stops being worth it. Ignoring it silences this supplier only."
+    },
+    "tou_available": {
+      "title": "Time-of-Use would save about ${savings} a year",
+      "description": "On your hourly usage, {supplier}'s {plan} works out to ${price}/kWh against your ${baseline}/kWh, about ${savings} a year ({pct}%) less.\n\nTime-of-Use prices peak hours (3–9 pm on weekdays) higher and nights lower. It's a tariff option, not a contract; ask the utility to enroll. The Time-of-Use sensor shows your peak share and what shifting load overnight would save."
+    },
+    "electric_rate_jump": {
+      "title": "Your electric supply rate rose {pct}%",
+      "description": "Your supply rate went from ${old}/kWh (on {old_date}) to ${new}/kWh. Variable rates often reset like this; the Energy Shopper sensors show whether another offer is cheaper now."
     }
   }
 }

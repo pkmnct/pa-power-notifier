@@ -25,13 +25,16 @@ SETTINGS = {CONF_USAGE_STATISTIC: USAGE_ID, CONF_THRESHOLD: 5.0, CONF_NO_CANCELL
 
 
 async def _start(hass: HomeAssistant):
-    return await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+    """Open the flow and pick gas from the fuel menu."""
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+    assert result["type"] is FlowResultType.MENU and result["menu_options"] == ["gas", "electric"]
+    return await hass.config_entries.flow.async_configure(result["flow_id"], {"next_step_id": "gas"})
 
 
 async def test_full_flow(hass: HomeAssistant, market: FakeMarket) -> None:
     await add_usage(hass)
     result = await _start(hass)
-    assert result["type"] is FlowResultType.FORM and result["step_id"] == "user"
+    assert result["type"] is FlowResultType.FORM and result["step_id"] == "gas"
     result = await hass.config_entries.flow.async_configure(result["flow_id"], MARKET)
     assert result["type"] is FlowResultType.FORM and result["step_id"] == "settings"
     result = await hass.config_entries.flow.async_configure(

@@ -13,24 +13,15 @@ import json
 import logging
 import os
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
 from energy_shopper_core.alerts import own_rate_alert, trend_note
-from energy_shopper_core.eligibility import ineligible_reason, prior_suppliers
-from energy_shopper_core.ranking import (
-    best_by_category,
-    lock_in_note,
-    pick_recommended,
-    rank_plans_by_annual,
-    rate_to_option,
-    tou_option_from_analysis,
-    tou_shift_option,
-)
-from energy_shopper_core.decision import Baseline, decide_gas
-from energy_shopper_core.report import CheckReport, RankedOption, UtilitySection
+from energy_shopper_core.eligibility import prior_suppliers
+from energy_shopper_core.ranking import rank_plans_by_annual  # noqa: F401  (re-exported for the plan scripts)
+from energy_shopper_core.decision import Baseline, CurrentPlan, decide_electric, decide_gas
+from energy_shopper_core.report import CheckReport, UtilitySection
 from energy_shopper_core.seasons import (
     ELECTRIC_HIGH_USE_MONTHS,
-    MONTH_NAMES,
 )
 from energy_shopper_core.tou import TOUAnalyzer
 from energy_shopper_core.usage import (
@@ -397,27 +388,6 @@ def _backfill_gas_bills(report: CheckReport) -> None:
         report.add_warning("warning", "gas", f"People's Gas bill backfill failed: {e}")
 
 
-def _drop_ineligible(rates: list, history: list, report: CheckReport, utility: str) -> list:
-    """Remove new-customer-only offers from suppliers you've already used."""
-    if not history:
-        return rates
-    kept = []
-    skipped: Dict[str, List[str]] = {}
-    for r in rates:
-        why = ineligible_reason(r, history)
-        if why:
-            skipped.setdefault(r.supplier.strip(), []).append(why)
-        else:
-            kept.append(r)
-    for supplier, reasons in skipped.items():
-        report.add_warning(
-            "info",
-            utility,
-            f"Skipped {len(reasons)} {supplier} offer(s): {reasons[0]}",
-        )
-    return kept
-
-
 def _filters_list(checker: Any) -> List[str]:
     out = []
     if getattr(checker, "filter_no_cancellation_fee", False):
@@ -632,162 +602,61 @@ def build_check_report(checker: Any) -> CheckReport:
         else:
             elec_section.current_plan_label = getattr(checker, "electric_rate_type", "") or "RS (configured)"
 
-    annual_kwh = 0.0
-    if usage:
-        annual_kwh = usage.annual_kwh
-        elec_section.annual_units = annual_kwh
-        elec_section.usage_summary = (
-            f"{usage.total_kwh:,.0f} kWh over {usage.span_days:.0f} days "
-            f"({usage.baseline_label}); annual projection {annual_kwh:,.0f} kWh via {usage.annual_method}"
-        )
-        if usage.missing_high_use_months:
-            names = ", ".join(MONTH_NAMES[m] for m in usage.missing_high_use_months)
-            elec_section.seasonal_coverage_note = (
-                f"Summer AC months with no observed usage in this window: {names}. "
-                "Annual cost is extrapolated; lock-in advice is weaker until those months accumulate."
-            )
-            report.add_warning("warning", "electric", elec_section.seasonal_coverage_note)
-        if usage.span_days < 60:
-            report.add_warning(
-                "warning",
-                "electric",
-                f"Usage window is only {usage.span_days:.0f} days — annualized costs have wide uncertainty.",
-            )
-        blended = usage.baseline_cost / usage.total_kwh if usage.total_kwh > 0 else current_electric
-        if blended:
-            elec_section.current_blended_rate = blended
-
+    # Supplier-history notes go between the usage and ranking notes, as they always have.
+    history_report = CheckReport()
     elec_history = prior_suppliers(
-        _electric_supplier_history(checker, report),
+        _electric_supplier_history(checker, history_report),
         current_supplier=egs.supplier if egs else "",
         configured=os.getenv("PRIOR_ELECTRIC_SUPPLIERS", ""),
     )
-    eligible_e = _drop_ineligible(electric_rates, elec_history, report, "electric")
-    filtered_e = checker.apply_filters(eligible_e)
-    if eligible_e and not filtered_e:
-        report.add_warning("warning", "electric", "Filters removed every electric offer.")
-    ranked_e: List[RankedOption] = []
-    if annual_kwh > 0:
-        ranked_e = rank_plans_by_annual(filtered_e, annual_kwh, "kWh")
-    else:
-        for r in filtered_e:
-            p = r.get_numeric_price()
-            if p is None or p <= 0:
-                continue
-            ranked_e.append(rate_to_option(r, 0.0, "kWh"))
-        ranked_e.sort(key=lambda o: o.unit_price or 9e9)
-        report.add_warning("warning", "electric", "Ranked by listed $/kWh because annual kWh is unknown.")
-
-    tou_rates, tou_result = _run_tou(checker, current_electric, hourly, report)
-    if tou_result is not None and annual_kwh > 0:
-        tou_opt = tou_option_from_analysis(tou_result, tou_rates, annual_kwh)
-        ranked_e.append(tou_opt)
-        ranked_e.sort(key=lambda o: o.annual_supply_usd)
-        elec_section.tou_recommended = bool(tou_result.tou_recommended)
-
-    stay_e = None
-    # Prefer current EGS from bill as the stay baseline.
-    if egs and egs.supply_rate_per_kwh > 0 and annual_kwh > 0:
-        stay_e = RankedOption(
+    # TOU warnings go after the ranking notes, where the report has always shown them.
+    tou_report = CheckReport()
+    tou_rates, tou_result = _run_tou(checker, current_electric, hourly, tou_report)
+    current_plan = None
+    if egs and egs.supply_rate_per_kwh > 0:
+        current_plan = CurrentPlan(
             supplier=egs.supplier,
-            plan_type="Current EGS supply (from DLC bill)",
-            unit="kWh",
-            annual_supply_usd=round(annual_kwh * egs.supply_rate_per_kwh, 2),
-            unit_price=egs.supply_rate_per_kwh,
-            is_current_egs=True,
-            term_raw="Current contract",
+            price=egs.supply_rate_per_kwh,
             more_info=f"Bill {egs.bill_id}" if egs.bill_id else "",
-            flags=["supply-only ENERGY CHARGE from latest Duquesne bill PDF"],
         )
-        ranked_e.append(stay_e)
-
-    # Ensure DLC PTC / default appears as a competing option (not the stay baseline).
-    if ptc and annual_kwh > 0:
-        already = any(
-            o.is_utility_default or (
-                "duquesne light" in o.supplier.lower()
-                and "price to compare" in o.plan_type.lower()
-            )
-            for o in ranked_e
-        )
-        if not already:
-            ranked_e.append(
-                RankedOption(
-                    supplier="Duquesne Light",
-                    plan_type="Default supply (Price to Compare)",
-                    unit="kWh",
-                    annual_supply_usd=round(annual_kwh * ptc, 2),
-                    unit_price=ptc,
-                    is_utility_default=True,
-                    term_raw="Default",
-                    flags=["DLC default if you leave your EGS"],
-                )
-            )
-
-    if stay_e is None:
-        for opt in ranked_e:
-            if opt.is_utility_default:
-                stay_e = opt
-                break
-    if stay_e is None and ptc and annual_kwh > 0:
-        stay_e = RankedOption(
-            supplier="Duquesne Light",
-            plan_type="Default supply (PTC / flat DSS)",
-            unit="kWh",
-            annual_supply_usd=round(annual_kwh * ptc, 2),
-            unit_price=ptc,
-            is_utility_default=True,
-            term_raw="Default",
-        )
-        ranked_e.append(stay_e)
-    elif stay_e is None and current_electric > 0 and annual_kwh > 0 and not ptc:
-        stay_e = RankedOption(
-            supplier="Current blended (overstates vs supply offers)",
-            plan_type="All-in effective rate",
-            unit="kWh",
-            annual_supply_usd=round(annual_kwh * current_electric, 2),
-            unit_price=current_electric,
-            is_utility_default=True,
-            term_raw="Current",
-            flags=["not supply-only — comparison to EGS offers overstates savings"],
-        )
-
-    ranked_e.sort(key=lambda o: o.annual_supply_usd if annual_kwh > 0 else (o.unit_price or 9e9))
-
-    rec_e, switch_e, pct_e, sav_e = pick_recommended(ranked_e, stay_e, report.threshold_pct)
-    # TOU only forces a switch recommendation when it clears the same threshold
-    # on the shared annual-kWh leaderboard (already handled by pick_recommended).
-    if rec_e and rec_e.is_tou and stay_e and stay_e.annual_supply_usd > 0:
-        tou_sav = stay_e.annual_supply_usd - rec_e.annual_supply_usd
-        tou_pct = 100.0 * tou_sav / stay_e.annual_supply_usd
-        elec_section.tou_recommended = tou_sav > 0 and tou_pct >= report.threshold_pct
-        if elec_section.tou_recommended:
-            switch_e = True
-            sav_e = tou_sav
-            pct_e = tou_pct
-    elif tou_result is not None:
-        elec_section.tou_recommended = False
-
+    elec = decide_electric(
+        electric_rates,
+        usage=usage,
+        current=current_plan,
+        price_to_compare=ptc,
+        threshold_pct=report.threshold_pct,
+        blended_rate=current_electric,
+        prior=elec_history,
+        no_cancellation_fee=getattr(checker, "filter_no_cancellation_fee", False),
+        renewable_only=getattr(checker, "filter_renewable_only", False),
+        tou_rates=tou_rates,
+        tou_result=tou_result,
+    )
+    for level, message in elec.usage_notes:
+        report.add_warning(level, "electric", message)
+    report.warnings.extend(history_report.warnings)
+    for level, message in elec.notes:
+        report.add_warning(level, "electric", message)
+    report.warnings.extend(tou_report.warnings)
+    annual_kwh = elec.annual_kwh
+    if usage:
+        elec_section.annual_units = annual_kwh
+        elec_section.usage_summary = elec.usage_summary
+        if elec.seasonal_coverage_note:
+            elec_section.seasonal_coverage_note = elec.seasonal_coverage_note
+        if elec.blended_rate:
+            elec_section.current_blended_rate = elec.blended_rate
+    if elec.tou_recommended is not None:
+        elec_section.tou_recommended = elec.tou_recommended
+    ranked_e = elec.ranked
     elec_section.ranked = ranked_e
-    elec_section.recommended = rec_e
-    elec_section.stay_option = stay_e
-    elec_section.recommend_switch = switch_e
-    elec_section.savings_pct = pct_e
-    elec_section.savings_annual_usd = sav_e
-    elec_section.lock_in_note = lock_in_note("electric", rec_e, stay_e, switch_e)
-    extras_e: List[Tuple[str, Optional[RankedOption]]] = []
-    if tou_result is not None and annual_kwh > 0:
-        for shift in (0.25, 0.5):
-            extras_e.append(
-                (f"TOU, shift {shift:.0%} of peak", tou_shift_option(tou_result, tou_rates, annual_kwh, shift))
-            )
-    if annual_kwh > 0 and len(filtered_e) < len(eligible_e):
-        removed = [r for r in eligible_e if r not in filtered_e]
-        best_removed = rank_plans_by_annual(removed, annual_kwh, "kWh")
-        best_kept = min((o.annual_supply_usd for o in ranked_e if not o.is_current_egs), default=None)
-        if best_removed and (best_kept is None or best_removed[0].annual_supply_usd < best_kept):
-            extras_e.append(("Best your filters removed", best_removed[0]))
-    elec_section.highlights = best_by_category(ranked_e, "electric", extras=extras_e)
+    elec_section.recommended = elec.recommended
+    elec_section.stay_option = elec.stay
+    elec_section.recommend_switch = elec.recommend_switch
+    elec_section.savings_pct = elec.savings_pct
+    elec_section.savings_annual_usd = elec.savings_annual_usd
+    elec_section.lock_in_note = elec.lock_in_note
+    elec_section.highlights = elec.highlights
     if BillArchive is not None:
         jump = own_rate_alert(
             BillArchive(getattr(checker, "bill_archive_dir", None)).supply_rate_history(),

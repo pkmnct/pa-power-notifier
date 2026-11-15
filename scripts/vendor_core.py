@@ -42,6 +42,8 @@ VENDORED = {
         "ranking.py",
         "report.py",
         "seasons.py",
+        "tou.py",
+        "usage.py",
     ],
 }
 

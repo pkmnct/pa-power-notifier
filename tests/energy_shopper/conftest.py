@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -148,3 +148,142 @@ def config_entry() -> MockConfigEntry:
 
 
 CONNECTION_ERROR = requests.ConnectionError("down")
+
+
+# ---------------------------------------------------------------------------
+# Electric
+# ---------------------------------------------------------------------------
+
+ELECTRIC_USAGE_ID = "duquesne_collector:test_energy_consumption"
+SHOP_URL = (
+    "https://www.papowerswitch.com/shop-for-rates-results/?zipcode=15222&serviceType=residential"
+    "&distributor=1180&distributorrate=RS+-+Regular+Residential+Service"
+)
+CURRENT_RATE = 0.1500  # $/kWh, your supplier
+ELECTRIC_PTC = 0.1414  # $/kWh, Duquesne default
+HOURLY_DAYS = 60
+MIDNIGHT_ONLY_DAYS = 30  # older days backfilled as one row at midnight
+
+
+def electric_offer(supplier: str, price: float, kind: str = "Fixed", **kw) -> Rate:
+    fields = dict(
+        price=f"${price:.4f}",
+        supplier=supplier,
+        type=kind,
+        cancellation_fee=kw.pop("cancellation_fee", "None"),
+        deposit_required="No",
+        discounts_incentives="",
+        introductory_price="",
+        monthly_fee="None",
+        more_info=kw.pop("more_info", ""),
+        service_type="Residential",
+        term_end_date="",
+        term_length=kw.pop("term", "12 Months"),
+        utility_type="electric",
+        renewable=kw.pop("renewable", "No"),
+        phone=kw.pop("phone", "800-555-0123"),
+    )
+    fields.update(kw)
+    return Rate(**fields)
+
+
+class FakePowerSwitch:
+    def __init__(self) -> None:
+        self.offers = [
+            electric_offer("Bright Power", 0.1000),
+            electric_offer("Green Volts", 0.1050, renewable="Yes", more_info="100% wind energy."),
+            electric_offer("Our Supplier LLC", 0.0900, new_customers_offer="Yes"),
+            electric_offer("Steep Energy", 0.1900, kind="Variable", term="Month to Month"),
+        ]
+        self.error: Exception | None = None
+
+    def fetch_offers(self) -> base.OfferListing:
+        if self.error is not None:
+            raise self.error
+        return base.OfferListing(list(self.offers), "csv")
+
+
+@pytest.fixture
+def power_switch() -> Generator[FakePowerSwitch]:
+    m = FakePowerSwitch()
+    with patch.object(pa, "PaPowerSwitch", lambda *a, **kw: m):
+        yield m
+
+
+def hourly_kwh(start) -> float:
+    """Light at peak (3–9 pm weekdays), heavy overnight: Time-of-Use friendly."""
+    local = dt_util.as_local(start)
+    if 15 <= local.hour < 21 and local.weekday() < 5:
+        return 0.3
+    if local.hour >= 23 or local.hour < 6:
+        return 2.0
+    return 1.0
+
+
+async def add_hourly_usage(hass: HomeAssistant, unit: str = "kWh") -> None:
+    """60 days of hourly kWh, after 30 older days stored as one midnight row each."""
+    tz = dt_util.get_default_time_zone()
+    today = dt_util.now().date()
+    first_hourly = today - timedelta(days=HOURLY_DAYS)
+    rows, total = [], 0.0
+    for n in range(MIDNIGHT_ONLY_DAYS, 0, -1):
+        day = first_hourly - timedelta(days=n)
+        total += 30.0
+        rows.append({"start": dt_util.as_utc(datetime(day.year, day.month, day.day, tzinfo=tz)), "state": 30.0, "sum": total})
+    start = dt_util.as_utc(datetime(first_hourly.year, first_hourly.month, first_hourly.day, tzinfo=tz))
+    while start < dt_util.as_utc(datetime(today.year, today.month, today.day, tzinfo=tz)):
+        kwh = hourly_kwh(start)
+        total += kwh
+        rows.append({"start": start, "state": kwh, "sum": total})
+        start += timedelta(hours=1)
+    async_add_external_statistics(
+        hass,
+        {
+            "mean_type": StatisticMeanType.NONE,
+            "has_sum": True,
+            "name": "Test electricity",
+            "source": "duquesne_collector",
+            "statistic_id": ELECTRIC_USAGE_ID,
+            "unit_class": "energy" if unit == "kWh" else VolumeConverter.UNIT_CLASS,
+            "unit_of_measurement": unit,
+        },
+        rows,
+    )
+    await async_wait_recording_done(hass)
+
+
+def set_bill_sensors(hass: HomeAssistant, supplier: str | None = "Our Supplier LLC", rate: float | None = CURRENT_RATE) -> None:
+    hass.states.async_set("sensor.dl_supplier", supplier or "Duquesne Light default service")
+    hass.states.async_set("sensor.dl_rate", str(rate) if rate is not None else "unknown", {"unit_of_measurement": "USD/kWh"})
+    hass.states.async_set("sensor.dl_ptc", str(ELECTRIC_PTC), {"unit_of_measurement": "USD/kWh"})
+
+
+@pytest.fixture
+def electric_entry() -> MockConfigEntry:
+    from custom_components.energy_shopper.const import (
+        CONF_FUEL,
+        CONF_PTC_ENTITY,
+        CONF_RATE_ENTITY,
+        CONF_RATE_TYPE,
+        CONF_SUPPLIER_ENTITY,
+    )
+
+    return MockConfigEntry(
+        domain=DOMAIN,
+        title="Electric offers 15222",
+        unique_id="electric_1180_rs_regular_residential_service_15222",
+        data={
+            CONF_FUEL: "electric",
+            CONF_DISTRIBUTOR: "1180",
+            CONF_RATE_TYPE: "RS - Regular Residential Service",
+            CONF_ZIPCODE: ZIP,
+            CONF_SERVICE_TYPE: "residential",
+        },
+        options={
+            CONF_USAGE_STATISTIC: ELECTRIC_USAGE_ID,
+            CONF_SUPPLIER_ENTITY: "sensor.dl_supplier",
+            CONF_RATE_ENTITY: "sensor.dl_rate",
+            CONF_PTC_ENTITY: "sensor.dl_ptc",
+            CONF_THRESHOLD: 5.0,
+        },
+    )

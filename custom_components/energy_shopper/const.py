@@ -1,4 +1,4 @@
-"""Constants for the Energy Shopper integration (gas, Pennsylvania)."""
+"""Constants for the Energy Shopper integration (Pennsylvania gas and electric)."""
 
 from __future__ import annotations
 
@@ -6,10 +6,16 @@ from datetime import timedelta
 
 DOMAIN = "energy_shopper"
 
-# PA Gas Switch publishes offer changes during the day; twice a day is plenty and polite.
+# PA Power/Gas Switch publish offer changes during the day; twice a day is plenty and polite.
 UPDATE_INTERVAL = timedelta(hours=12)
 
-# Config entry data: which market to shop.
+# Config entry data: which fuel and market to shop. Entries without a fuel are gas
+# (the first version only did gas).
+CONF_FUEL = "fuel"
+FUEL_GAS = "gas"
+FUEL_ELECTRIC = "electric"
+CONF_SHOP_URL = "shop_url"  # electric: PA Power Switch results URL
+CONF_RATE_TYPE = "rate_type"  # electric: rate class, from that URL
 CONF_ZIPCODE = "zipcode"
 CONF_DISTRIBUTOR = "distributor"
 CONF_SERVICE_TYPE = "service_type"
@@ -25,6 +31,15 @@ CONF_NO_CANCELLATION_FEE = "no_cancellation_fee"
 CONF_PRIOR_SUPPLIERS = "prior_suppliers"
 CONF_RATE_JUMP_PCT = "rate_jump_pct"
 CONF_THERMS_PER_MCF = "therms_per_mcf"
+# Electric only
+CONF_SUPPLIER_ENTITY = "current_supplier_entity"
+CONF_SUPPLIER_NAME = "current_supplier"
+CONF_PTC_ENTITY = "price_to_compare_entity"
+CONF_PTC_VALUE = "price_to_compare_value"
+CONF_RENEWABLE_ONLY = "renewable_only"
+CONF_TOU_PEAK = "tou_peak_cents"
+CONF_TOU_OFF_PEAK = "tou_off_peak_cents"
+CONF_TOU_SUPER_OFF_PEAK = "tou_super_off_peak_cents"
 
 DEFAULT_SERVICE_TYPE = "residential"
 DEFAULT_THRESHOLD = 5.0
@@ -32,13 +47,17 @@ DEFAULT_RATE_JUMP_PCT = 10.0
 PRICE_UNITS = ["mcf", "ccf", "therm"]
 
 # How much history to read from the usage statistic.
-USAGE_LOOKBACK_DAYS = 3 * 365
+USAGE_LOOKBACK_DAYS = 3 * 365  # gas, monthly
+HOURLY_LOOKBACK_DAYS = 400  # electric, hourly (what Opower keeps)
+# A day counts as hourly data (for Time-of-Use) with readings in at least this many hours.
+TOU_MIN_HOURS_PER_DAY = 20
 
 EVENT_RECOMMENDATION_CHANGED = f"{DOMAIN}_recommendation_changed"
 
-ISSUE_CHEAPER_GAS = "cheaper_gas_supplier"
-ISSUE_RATE_JUMP = "gas_rate_jump"
+ISSUE_CHEAPER = "cheaper_{fuel}_supplier"
+ISSUE_RATE_JUMP = "{fuel}_rate_jump"
 
 CURRENCY = "USD"
 SHOP_URL = "https://www.pagasswitch.com/shop-for-rates/"
+ELECTRIC_SHOP_URL = "https://www.papowerswitch.com/shop-for-rates/"
 LEADERBOARD_SIZE = 15

@@ -20,7 +20,7 @@ SWITCH = {
 }
 
 
-async def _automation(hass: HomeAssistant, include_stay: bool) -> list:
+async def _automation(hass: HomeAssistant, include_stay: bool, fuels: list[str] | None = None) -> list:
     dest = Path(hass.config.path("blueprints/automation/energy_shopper"))
     dest.mkdir(parents=True, exist_ok=True)
     shutil.copy(BLUEPRINT, dest / BLUEPRINT.name)
@@ -32,7 +32,11 @@ async def _automation(hass: HomeAssistant, include_stay: bool) -> list:
             "automation": {
                 "use_blueprint": {
                     "path": f"energy_shopper/{BLUEPRINT.name}",
-                    "input": {"notify_action": "notify.phone", "include_stay": include_stay},
+                    "input": {
+                        "notify_action": "notify.phone",
+                        "include_stay": include_stay,
+                        **({"fuels": fuels} if fuels is not None else {}),
+                    },
                 }
             }
         },
@@ -61,3 +65,27 @@ async def test_stay_when_asked(hass: HomeAssistant) -> None:
     await hass.async_block_till_done()
     assert len(calls) == 1
     assert calls[0].data["title"] == "Gas: stay on your current rate"
+
+
+TOU_EVENT = {
+    "fuel": "electric", "recommendation": "switch", "previous": "stay", "supplier": "Duquesne Light",
+    "plan_type": "Time-of-Use Supply (Rider No. 8)", "time_of_use": True, "term": "Tariff / pilot",
+    "price": 0.0981, "unit": "kWh", "current_price": 0.15, "annual_savings": 512.4, "savings_pct": 34.6, "phone": None,
+}
+
+
+async def test_electric_time_of_use(hass: HomeAssistant) -> None:
+    calls = await _automation(hass, include_stay=False)
+    hass.bus.async_fire(EVENT_RECOMMENDATION_CHANGED, TOU_EVENT)
+    await hass.async_block_till_done()
+    assert calls[0].data["title"] == "Electric: Time-of-Use would save"
+    msg = " ".join(calls[0].data["message"].split())
+    assert msg.startswith("Duquesne Light Time-of-Use Supply (Rider No. 8) is $0.0981/kWh vs your $0.1500/kWh, about $512/yr (35%) less.")
+
+
+async def test_fuel_filter(hass: HomeAssistant) -> None:
+    calls = await _automation(hass, include_stay=True, fuels=["gas"])
+    hass.bus.async_fire(EVENT_RECOMMENDATION_CHANGED, TOU_EVENT)
+    hass.bus.async_fire(EVENT_RECOMMENDATION_CHANGED, {**TOU_EVENT, "recommendation": "stay"})
+    await hass.async_block_till_done()
+    assert calls == []

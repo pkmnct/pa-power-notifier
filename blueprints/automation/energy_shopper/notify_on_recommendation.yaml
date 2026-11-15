@@ -1,8 +1,9 @@
 blueprint:
-  name: Energy Shopper — notify when switching gas supplier pays
+  name: Energy Shopper — notify when switching supplier pays
   description: >
-    Sends a notification when Energy Shopper's gas recommendation changes, for example
-    when a supplier becomes cheaper than your current rate by your threshold.
+    Sends a notification when an Energy Shopper recommendation (gas or electric) changes,
+    for example when a supplier or Time-of-Use becomes cheaper than your current rate by
+    your threshold.
   domain: automation
   source_url: https://github.com/pkmnct/pa-power-notifier/blob/main/blueprints/automation/energy_shopper/notify_on_recommendation.yaml
   input:
@@ -12,6 +13,13 @@ blueprint:
       default: notify.notify
       selector:
         text: {}
+    fuels:
+      name: Fuels
+      default: [gas, electric]
+      selector:
+        select:
+          multiple: true
+          options: [gas, electric]
     include_stay:
       name: Also notify when it goes back to "stay"
       default: false
@@ -24,20 +32,22 @@ triggers:
 
 variables:
   include_stay: !input include_stay
+  fuels: !input fuels
   e: "{{ trigger.event.data }}"
+  fuel: "{{ e.fuel | default('gas') }}"
 
 conditions:
   - condition: template
-    value_template: "{{ e.recommendation == 'switch' or include_stay }}"
+    value_template: "{{ fuel in fuels and (e.recommendation == 'switch' or include_stay) }}"
 
 actions:
   - action: !input notify_action
     data:
       title: >-
-        {% if e.recommendation == 'switch' %}Cheaper gas: {{ e.supplier }}{% else %}Gas: stay on your current rate{% endif %}
+        {% if e.recommendation != 'switch' %}{{ fuel | capitalize }}: stay on your current rate{% elif e.get('time_of_use') %}Electric: Time-of-Use would save{% else %}Cheaper {{ fuel }}: {{ e.supplier }}{% endif %}
       message: >-
         {% if e.recommendation == 'switch' %}
-        {{ e.supplier }} ({{ e.plan_type }}, {{ e.term }}) is ${{ '%.4f' % e.price }}/{{ e.unit }}
+        {{ e.supplier }} {% if e.get('time_of_use') %}{{ e.plan_type }}{% else %}({{ e.plan_type }}, {{ e.term }}){% endif %} is ${{ '%.4f' % e.price }}/{{ e.unit }}
         vs your ${{ '%.4f' % e.current_price }}/{{ e.unit }}, about ${{ '%.0f' % e.annual_savings }}/yr
         ({{ '%.0f' % e.savings_pct }}%) less.{% if e.phone %} Call {{ e.phone }}.{% endif %}
         {% else %}

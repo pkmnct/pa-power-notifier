@@ -1,6 +1,6 @@
 # Home Assistant integration: design draft
 
-Status: draft for discussion, 2026-11-14. Step 1 of the build order is partly done (see "Step 1 progress"); steps 2 and 3 are built and tested offline (see "Step 2 progress" and "Step 3 progress"), not yet run in a live Home Assistant. Step 4's Duquesne collector and its `duquesne_collector` integration are built (see "Step 4 progress").
+Status: draft for discussion, 2026-11-14. Step 1 of the build order is partly done (see "Step 1 progress"); steps 2, 3 and 5 are built and tested offline (see "Step 2 progress", "Step 3 progress" and "Step 5 progress"), not yet run in a live Home Assistant. Step 4's Duquesne collector and its `duquesne_collector` integration are built (see "Step 4 progress").
 
 ## Goal
 
@@ -153,10 +153,10 @@ The package has no environment reads, file access or imports from the rest of th
 
 Still to do in step 1:
 
-- **Orchestration.** Done for gas: `energy_shopper_core.decision.decide_gas` is the
-  "inputs in, decision out" middle, and both the CLI and the `energy_shopper` integration
-  call it. Electric (with Time-of-Use) is still inline in
-  `recommendation_engine.build_check_report`; it moves with step 5.
+- **Orchestration.** Done: `energy_shopper_core.decision.decide_gas` and
+  `decide_electric` are the "inputs in, decision out" middle, and both the CLI and the
+  `energy_shopper` integration call them. `build_check_report` keeps only gathering,
+  archiving and the report's warnings.
 - **Utility names in the ranking code.** "Duquesne Light" and "People's Gas" labels are
   hard-coded in `ranking.py` (default-service detection, Time-of-Use rows). They need to
   become parameters before a second utility or state.
@@ -260,6 +260,30 @@ the real collector serving a copy of the archive.
 Live against the archive copy: 10,290 hourly rows (Aug 2025 → Nov 2026, 12,849 kWh), 9,978
 priced (312 old hours Opower never priced are skipped), newest bill's supplier and rates
 read correctly. Not run in a live HA.
+
+## Step 5 progress
+
+Electric is in `energy_shopper`, 2026-11-15, with Time-of-Use. Offline Home Assistant
+tests: `tests/energy_shopper/` is now 31 (gas, electric, blueprint). Not yet run in a live
+HA instance.
+
+| Piece | What it does |
+|---|---|
+| Core | `decide_electric(offers, usage window, current plan, Price to Compare, threshold, prior suppliers, filters, TOU rates + analysis)`: the CLI's electric block moved as is (bill supplier as the stay, default service listed as an option and used as the stay when you're on it, the blended-rate last resort, Time-of-Use on the shared leaderboard with the same threshold, 25% / 50% load-shift rows). Usage and ranking notes come back separately so the CLI keeps its warning order. The CLI's text and HTML reports and log are unchanged on archived data with live offers |
+| Config flow | The first step is a menu: gas or electric. Electric takes the PA Power Switch results URL (distributor, rate class, ZIP; `invalid_shop_url`, `no_offers`), then the usage statistic, supplier sensor or name, supply-rate sensor or value, Price to Compare sensor or value, renewable-only and no-cancellation-fee filters, prior suppliers and the three Time-of-Use rates in ¢/kWh. Existing gas entries (no fuel key) stay gas |
+| Usage | Hourly `change` of an energy statistic over 400 days (the `duquesne_collector` one, core Opower, a meter), projected to a year as the CLI does. Time-of-Use uses only days with 20+ hourly readings, so midnight-only backfill days don't count as overnight use |
+| Current plan | The supplier sensor's state (blank or "default service" means Duquesne default) with the supply-rate sensor ($/kWh or ¢/kWh); your current supplier counts as a prior supplier for new-customer offers |
+| Sensors | The gas set with `electric_` keys (recommendation, best offer, price, savings $ and %, current rate, Price to Compare, projected annual kWh, offers ranked), plus "Time-of-Use annual savings" vs your current plan, with peak/off-peak/super-off-peak shares, rates and the load-shifted options |
+| Issues and event | "Cheaper electric supplier: X", "Time-of-Use would save about $N a year", "Your electric supply rate rose N%"; the change event carries `fuel` and `time_of_use`, and the blueprint filters by fuel |
+
+A live run of the integration's electric path (live PA Power Switch, the archived hourly
+usage, the newest bill) matched the CLI: with the CLI run's inputs both recommend
+American Power & Gas Variable at $0.1019/kWh, saving ~$85/yr (7.0%).
+
+Time-of-Use rates are typed in: the tariff PDF scraper still doesn't work (see the
+README), and they change each Jun 1 and Dec 1. Electric supplier history beyond the
+current supplier comes only from "Suppliers you've used before"; the collector has the
+full bill history and could expose it.
 
 ## Open questions
 

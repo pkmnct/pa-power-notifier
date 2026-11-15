@@ -1,6 +1,6 @@
 {
   "domain": "energy_shopper",
-  "name": "Energy Shopper (PA gas offers)",
+  "name": "Energy Shopper (PA energy offers)",
   "codeowners": [],
   "config_flow": true,
   "dependencies": ["recorder"],

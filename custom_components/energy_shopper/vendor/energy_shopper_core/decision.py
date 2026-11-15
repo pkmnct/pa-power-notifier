@@ -25,9 +25,12 @@ from .ranking import (
     pick_recommended,
     rank_plans_by_annual,
     rate_to_option,
+    tou_option_from_analysis,
+    tou_shift_option,
 )
 from .report import RankedOption
 from .seasons import GAS_HIGH_USE_MONTHS, MONTH_NAMES
+from .usage import UsageWindow
 
 Note = Tuple[str, str]  # (level: info | warning | error, message)
 
@@ -154,7 +157,7 @@ def decide_gas(
     fallback_monthly_therms: Optional[float] = None,
     therms_per_mcf: float = DEFAULT_THERMS_PER_MCF,
     aggregator: str = "median",
-    utility_name: str = "People's Gas",
+    utility_name: str = "People's Gas",  # labels the stay row
     today: Optional[date] = None,
 ) -> GasDecision:
     """
@@ -251,4 +254,216 @@ def decide_gas(
         if removed and (best_kept is None or removed[0].annual_supply_usd < best_kept):
             extras.append(("Best your filters removed", removed[0]))
     d.highlights = best_by_category(ranked, "gas", extras=extras)
+    return d
+
+
+# ---------------------------------------------------------------------------
+# Electric
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CurrentPlan:
+    """The supplier you're on now and its supply-only price (from the bill)."""
+
+    supplier: str
+    price: float  # USD/kWh
+    plan_type: str = "Current EGS supply (from DLC bill)"
+    term_raw: str = "Current contract"
+    more_info: str = ""
+    flags: List[str] = field(default_factory=lambda: ["supply-only ENERGY CHARGE from latest Duquesne bill PDF"])
+
+
+@dataclass
+class ElectricDecision:
+    annual_kwh: float = 0.0
+    usage_summary: str = ""
+    seasonal_coverage_note: str = ""
+    blended_rate: Optional[float] = None  # $/kWh all-in, from the usage window's cost
+    ranked: List[RankedOption] = field(default_factory=list)
+    stay: Optional[RankedOption] = None
+    recommended: Optional[RankedOption] = None
+    recommend_switch: bool = False
+    savings_pct: Optional[float] = None
+    savings_annual_usd: Optional[float] = None
+    tou_recommended: Optional[bool] = None  # None: Time-of-Use wasn't scored
+    lock_in_note: str = ""
+    highlights: List[Tuple[str, RankedOption]] = field(default_factory=list)
+    usage_notes: List[Note] = field(default_factory=list)  # about the usage window
+    notes: List[Note] = field(default_factory=list)  # about offers and ranking
+    offers_eligible: int = 0
+    offers_after_filters: int = 0
+
+    @property
+    def all_notes(self) -> List[Note]:
+        return self.usage_notes + self.notes
+
+
+def decide_electric(
+    offers: Sequence[Any],
+    *,
+    usage: Optional[UsageWindow],
+    current: Optional[CurrentPlan],
+    price_to_compare: Optional[float],
+    threshold_pct: float,
+    blended_rate: float = 0.0,
+    prior: Sequence[PriorSupplier] = (),
+    no_cancellation_fee: bool = False,
+    renewable_only: bool = False,
+    tou_rates: Any = None,
+    tou_result: Any = None,
+    utility_name: str = "Duquesne Light",
+    today: Optional[date] = None,
+) -> ElectricDecision:
+    """
+    Rank electric offers ($/kWh) against your usage, your current supplier and the
+    utility's default service (Price to Compare), with Time-of-Use when scored.
+
+    current: your supplier from the bill, the stay baseline. price_to_compare: the
+    utility's default supply, listed as an option and the baseline when you're on it.
+    blended_rate: the all-in $/kWh, used as a last-resort baseline (overstates savings).
+    tou_rates / tou_result: from tou.TOUAnalyzer over your hourly usage, or None.
+    """
+    d = ElectricDecision()
+    annual_kwh = 0.0
+    if usage:
+        annual_kwh = usage.annual_kwh
+        d.usage_summary = (
+            f"{usage.total_kwh:,.0f} kWh over {usage.span_days:.0f} days "
+            f"({usage.baseline_label}); annual projection {annual_kwh:,.0f} kWh via {usage.annual_method}"
+        )
+        if usage.missing_high_use_months:
+            names = ", ".join(MONTH_NAMES[m] for m in usage.missing_high_use_months)
+            d.seasonal_coverage_note = (
+                f"Summer AC months with no observed usage in this window: {names}. "
+                "Annual cost is extrapolated; lock-in advice is weaker until those months accumulate."
+            )
+            d.usage_notes.append(("warning", d.seasonal_coverage_note))
+        if usage.span_days < 60:
+            d.usage_notes.append(
+                (
+                    "warning",
+                    f"Usage window is only {usage.span_days:.0f} days — annualized costs have wide uncertainty.",
+                )
+            )
+        blended = usage.baseline_cost / usage.total_kwh if usage.total_kwh > 0 else blended_rate
+        if blended:
+            d.blended_rate = blended
+    d.annual_kwh = annual_kwh
+
+    eligible, skipped_notes = drop_ineligible(offers, prior)
+    d.notes.extend(skipped_notes)
+    filtered = apply_filters(
+        eligible, no_cancellation_fee=no_cancellation_fee, renewable_only=renewable_only
+    )
+    d.offers_eligible, d.offers_after_filters = len(eligible), len(filtered)
+    if eligible and not filtered:
+        d.notes.append(("warning", "Filters removed every electric offer."))
+    ranked: List[RankedOption] = []
+    if annual_kwh > 0:
+        ranked = rank_plans_by_annual(filtered, annual_kwh, "kWh")
+    else:
+        for r in filtered:
+            p = r.get_numeric_price()
+            if p is None or p <= 0:
+                continue
+            ranked.append(rate_to_option(r, 0.0, "kWh"))
+        ranked.sort(key=lambda o: o.unit_price or 9e9)
+        d.notes.append(("warning", "Ranked by listed $/kWh because annual kWh is unknown."))
+
+    if tou_result is not None and annual_kwh > 0:
+        ranked.append(tou_option_from_analysis(tou_result, tou_rates, annual_kwh))
+        ranked.sort(key=lambda o: o.annual_supply_usd)
+        d.tou_recommended = bool(tou_result.tou_recommended)
+
+    stay = None
+    if current is not None and current.price > 0 and annual_kwh > 0:
+        stay = RankedOption(
+            supplier=current.supplier,
+            plan_type=current.plan_type,
+            unit="kWh",
+            annual_supply_usd=round(annual_kwh * current.price, 2),
+            unit_price=current.price,
+            is_current_egs=True,
+            term_raw=current.term_raw,
+            more_info=current.more_info,
+            flags=list(current.flags),
+        )
+        ranked.append(stay)
+
+    # The utility's default supply is always a competing option ("go back to default").
+    if price_to_compare and annual_kwh > 0:
+        already = any(
+            o.is_utility_default
+            or (utility_name.lower() in o.supplier.lower() and "price to compare" in o.plan_type.lower())
+            for o in ranked
+        )
+        if not already:
+            ranked.append(
+                RankedOption(
+                    supplier=utility_name,
+                    plan_type="Default supply (Price to Compare)",
+                    unit="kWh",
+                    annual_supply_usd=round(annual_kwh * price_to_compare, 2),
+                    unit_price=price_to_compare,
+                    is_utility_default=True,
+                    term_raw="Default",
+                    flags=["DLC default if you leave your EGS"],
+                )
+            )
+
+    if stay is None:
+        stay = next((o for o in ranked if o.is_utility_default), None)
+    if stay is None and price_to_compare and annual_kwh > 0:
+        stay = RankedOption(
+            supplier=utility_name,
+            plan_type="Default supply (PTC / flat DSS)",
+            unit="kWh",
+            annual_supply_usd=round(annual_kwh * price_to_compare, 2),
+            unit_price=price_to_compare,
+            is_utility_default=True,
+            term_raw="Default",
+        )
+        ranked.append(stay)
+    elif stay is None and blended_rate > 0 and annual_kwh > 0 and not price_to_compare:
+        stay = RankedOption(
+            supplier="Current blended (overstates vs supply offers)",
+            plan_type="All-in effective rate",
+            unit="kWh",
+            annual_supply_usd=round(annual_kwh * blended_rate, 2),
+            unit_price=blended_rate,
+            is_utility_default=True,
+            term_raw="Current",
+            flags=["not supply-only — comparison to EGS offers overstates savings"],
+        )
+
+    ranked.sort(key=lambda o: o.annual_supply_usd if annual_kwh > 0 else (o.unit_price or 9e9))
+
+    rec, switch, pct, savings = pick_recommended(ranked, stay, threshold_pct)
+    # TOU forces a switch only when it clears the same threshold on the shared leaderboard.
+    if rec and rec.is_tou and stay and stay.annual_supply_usd > 0:
+        tou_sav = stay.annual_supply_usd - rec.annual_supply_usd
+        tou_pct = 100.0 * tou_sav / stay.annual_supply_usd
+        d.tou_recommended = tou_sav > 0 and tou_pct >= threshold_pct
+        if d.tou_recommended:
+            switch, savings, pct = True, tou_sav, tou_pct
+    elif tou_result is not None:
+        d.tou_recommended = False
+
+    d.ranked, d.stay, d.recommended = ranked, stay, rec
+    d.recommend_switch, d.savings_pct, d.savings_annual_usd = switch, pct, savings
+    d.lock_in_note = lock_in_note("electric", rec, stay, switch, today=today)
+
+    extras: List[Tuple[str, Optional[RankedOption]]] = []
+    if tou_result is not None and annual_kwh > 0:
+        for shift in (0.25, 0.5):
+            extras.append(
+                (f"TOU, shift {shift:.0%} of peak", tou_shift_option(tou_result, tou_rates, annual_kwh, shift))
+            )
+    if annual_kwh > 0 and len(filtered) < len(eligible):
+        removed = rank_plans_by_annual([r for r in eligible if r not in filtered], annual_kwh, "kWh")
+        best_kept = min((o.annual_supply_usd for o in ranked if not o.is_current_egs), default=None)
+        if removed and (best_kept is None or removed[0].annual_supply_usd < best_kept):
+            extras.append(("Best your filters removed", removed[0]))
+    d.highlights = best_by_category(ranked, "electric", extras=extras)
     return d
