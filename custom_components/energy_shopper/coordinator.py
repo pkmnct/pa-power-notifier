@@ -26,8 +26,16 @@ from homeassistant.components.recorder.statistics import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfEnergy, UnitOfVolume
-from homeassistant.core import HomeAssistant
+from homeassistant.core import (
+    CALLBACK_TYPE,
+    CoreState,
+    Event,
+    EventStateChangedData,
+    HomeAssistant,
+    callback,
+)
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util, slugify
@@ -67,6 +75,7 @@ from .const import (
     FUEL_GAS,
     HOURLY_LOOKBACK_DAYS,
     ISSUE_CHEAPER,
+    ISSUE_INPUT_GONE,
     ISSUE_RATE_JUMP,
     SHOP_URL,
     TOU_MIN_HOURS_PER_DAY,
@@ -334,6 +343,61 @@ class EnergyShopperCoordinator(DataUpdateCoordinator[ShopperData]):
             return None, None
         return state.state, state.attributes.get("unit_of_measurement")
 
+    # -- input sensors: refresh when they come back, flag ones that are gone -------------
+
+    def _input_entities(self) -> list[str]:
+        keys = (CONF_RATE_ENTITY, CONF_SUPPLIER_ENTITY, CONF_PTC_ENTITY)
+        return [entity_id for key in keys if (entity_id := self._opt(key))]
+
+    def _has_value(self, entity_id: str) -> bool:
+        state = self.hass.states.get(entity_id)
+        return state is not None and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+
+    @callback
+    def async_watch_inputs(self) -> CALLBACK_TYPE:
+        """
+        Refresh as soon as every input that held the last refresh has a value again, rather
+        than waiting up to UPDATE_INTERVAL. At startup the first refresh often runs before
+        the integrations behind those sensors (duquesne_collector, peoples_gas, templates)
+        have loaded.
+        """
+        entities = self._input_entities()
+        if not entities:
+            return lambda: None
+        return async_track_state_change_event(self.hass, entities, self._async_input_changed)
+
+    @callback
+    def _async_input_changed(self, event: Event[EventStateChangedData]) -> None:
+        data = self.data
+        if data is None or not data.missing_inputs:
+            return
+        if all(self._has_value(entity_id) for entity_id in data.missing_inputs):
+            self.config_entry.async_create_background_task(
+                self.hass, self.async_request_refresh(), f"{DOMAIN} input back"
+            )
+
+    def _sync_input_gone_issue(self, missing: list[str]) -> None:
+        """
+        A repair issue for configured input sensors that don't exist at all (deleted or
+        renamed), which would otherwise hold the recommendation at unknown for good.
+        Only judged once Home Assistant is running: during startup, sensors from
+        integrations that haven't loaded yet don't exist either.
+        """
+        issue_id = f"{ISSUE_INPUT_GONE}_{self.config_entry.entry_id}"
+        gone = [entity_id for entity_id in missing if self.hass.states.get(entity_id) is None]
+        if gone and self.hass.state is CoreState.running:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                issue_id,
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=ISSUE_INPUT_GONE,
+                translation_placeholders={"entities": ", ".join(gone), "title": self.config_entry.title},
+            )
+        elif not gone:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+
     # -- inputs ------------------------------------------------------------------------
 
     async def _read_statistic(
@@ -437,6 +501,7 @@ class EnergyShopperCoordinator(DataUpdateCoordinator[ShopperData]):
         self._missing = []
         shopper = await (self._update_electric() if self.fuel == FUEL_ELECTRIC else self._update_gas())
         shopper.missing_inputs = list(dict.fromkeys(self._missing))
+        self._sync_input_gone_issue(shopper.missing_inputs)
         if shopper.missing_inputs and self.fuel == FUEL_ELECTRIC:
             shopper.notes.insert(
                 0,

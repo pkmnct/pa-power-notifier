@@ -56,6 +56,7 @@ EVENT_RECOMMENDATION_CHANGED = f"{DOMAIN}_recommendation_changed"
 
 ISSUE_CHEAPER = "cheaper_{fuel}_supplier"
 ISSUE_RATE_JUMP = "{fuel}_rate_jump"
+ISSUE_INPUT_GONE = "input_sensor_missing"
 
 CURRENCY = "USD"
 SHOP_URL = "https://www.pagasswitch.com/shop-for-rates/"

@@ -20,7 +20,7 @@ from custom_components.energy_shopper.const import (
 from custom_components.energy_shopper.coordinator import monthly_usage_cycles
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.util import dt as dt_util
 
@@ -342,3 +342,75 @@ def test_monthly_cycles_daily_source_drops_partial_first_month() -> None:
         rows += [(m + timedelta(days=d), 100.0) for d in range(start_day, 28)]
     cycles = monthly_usage_cycles(_day_rows(rows), "volume", 10.37, now)
     assert [(c.year, c.month) for c in cycles] == [(m.year, m.month) for m in months[1:-1]]
+
+
+def _with_rate_entity(config_entry: MockConfigEntry, entity_id: str) -> MockConfigEntry:
+    return MockConfigEntry(
+        domain=DOMAIN, title=config_entry.title, unique_id=config_entry.unique_id,
+        data=config_entry.data, options={**config_entry.options, CONF_RATE_ENTITY: entity_id},
+    )
+
+
+async def test_refreshes_when_held_input_gets_a_value(
+    hass: HomeAssistant, market: FakeMarket, config_entry
+) -> None:
+    """At startup the rate sensor's integration may load after this one: don't wait 12 h."""
+    await add_usage(hass)
+    entry = _with_rate_entity(config_entry, "sensor.peoples_ptc")
+    await _setup(hass, entry)  # the sensor doesn't exist yet
+    assert state(hass, "gas_recommendation").state == "unknown"
+
+    hass.states.async_set("sensor.peoples_ptc", "unavailable")  # still nothing to read
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert state(hass, "gas_recommendation").state == "unknown"
+
+    hass.states.async_set("sensor.peoples_ptc", "0.300", {ATTR_UNIT_OF_MEASUREMENT: "USD/CCF"})
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert state(hass, "gas_recommendation").state == "switch"
+    assert state(hass, "current_gas_supply_rate").attributes["source"] == "sensor"
+
+
+async def test_input_changes_do_not_refresh_when_nothing_was_held(
+    hass: HomeAssistant, market: FakeMarket, config_entry
+) -> None:
+    """Only a held refresh is redone early; a rate that just changes waits for the next poll."""
+    await add_usage(hass)
+    hass.states.async_set("sensor.peoples_ptc", "0.300", {ATTR_UNIT_OF_MEASUREMENT: "USD/CCF"})
+    entry = _with_rate_entity(config_entry, "sensor.peoples_ptc")
+    await _setup(hass, entry)
+    checked = state(hass, "gas_recommendation").attributes["last_checked"]
+    hass.states.async_set("sensor.peoples_ptc", "0.310", {ATTR_UNIT_OF_MEASUREMENT: "USD/CCF"})
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert state(hass, "gas_recommendation").attributes["last_checked"] == checked
+
+
+async def test_deleted_input_sensor_raises_issue(hass: HomeAssistant, market: FakeMarket, config_entry) -> None:
+    await add_usage(hass)
+    entry = _with_rate_entity(config_entry, "sensor.renamed_away")
+    issue_id = f"input_sensor_missing_{entry.entry_id}"
+
+    hass.set_state(CoreState.starting)  # during startup a missing sensor may just not be loaded yet
+    await _setup(hass, entry)
+    assert issues(hass, "input_sensor_missing") == []
+
+    hass.set_state(CoreState.running)
+    await _poll(hass, entry)
+    assert issues(hass, "input_sensor_missing") == [issue_id]
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, issue_id)
+    assert issue.translation_placeholders["entities"] == "sensor.renamed_away"
+    assert state(hass, "gas_recommendation").state == "unknown"
+
+    # An unavailable (but existing) sensor is not "gone".
+    hass.states.async_set("sensor.renamed_away", "unavailable")
+    await _poll(hass, entry)
+    assert issues(hass, "input_sensor_missing") == []
+
+    # Clearing the field in the options also clears the issue.
+    hass.states.async_remove("sensor.renamed_away")
+    await _poll(hass, entry)
+    assert issues(hass, "input_sensor_missing") == [issue_id]
+    hass.config_entries.async_update_entry(
+        entry, options={k: v for k, v in entry.options.items() if k != CONF_RATE_ENTITY}
+    )
+    await hass.async_block_till_done()
+    assert issues(hass, "input_sensor_missing") == []

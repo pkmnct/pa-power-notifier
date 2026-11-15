@@ -20,7 +20,8 @@
     "error": {
       "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
       "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
-      "unknown": "[%key:common::config_flow::error::unknown%]"
+      "unknown": "[%key:common::config_flow::error::unknown%]",
+      "username_changed": "The portal didn't show an account number, so this can't be confirmed as the same account. Keep the username this entry was set up with, or add the other account as a new entry."
     },
     "abort": {
       "already_configured": "[%key:common::config_flow::abort::already_configured_account%]",

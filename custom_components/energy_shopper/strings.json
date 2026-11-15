@@ -228,6 +228,10 @@
     "electric_rate_jump": {
       "title": "Your electric supply rate rose {pct}%",
       "description": "Your supply rate went from ${old}/kWh (on {old_date}) to ${new}/kWh. Variable rates often reset like this; the Energy Shopper sensors show whether another offer is cheaper now."
+    },
+    "input_sensor_missing": {
+      "title": "Energy Shopper input sensor is missing",
+      "description": "{title} is set to read {entities}, which doesn't exist (it may have been deleted or renamed). Until it's back, the recommendation stays unknown. Pick the sensor again in the integration's options, or clear that field."
     }
   }
 }

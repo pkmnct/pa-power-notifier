@@ -128,3 +128,39 @@ async def test_reauth_when_account_lookup_falls_back(
     assert result["reason"] == "reauth_successful"
     assert config_entry.data[CONF_PASSWORD] == "new-secret"
     assert config_entry.unique_id == ACCOUNT  # unchanged
+
+
+async def test_reauth_unverified_account_keeps_username(
+    recorder_mock, hass: HomeAssistant, mock_setup_entry, portal, config_entry
+) -> None:
+    """Without an account number to compare, a different username could be another account."""
+    config_entry.add_to_hass(hass)
+    portal.account = ""  # lookup falls back to the username
+    result = await config_entry.start_reauth_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_USERNAME: "someone.else@example.com", CONF_PASSWORD: PASSWORD}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_USERNAME: "username_changed"}
+    assert config_entry.data[CONF_USERNAME] == USERNAME
+
+    # The same username, spelled differently, is still the same login.
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_USERNAME: f"  {USERNAME.upper()} ", CONF_PASSWORD: PASSWORD}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+
+
+async def test_reauth_verified_account_may_change_username(
+    recorder_mock, hass: HomeAssistant, mock_setup_entry, portal, config_entry
+) -> None:
+    """A real account number that matches proves it's the same account, whatever the username."""
+    config_entry.add_to_hass(hass)
+    result = await config_entry.start_reauth_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_USERNAME: "new.login@example.com", CONF_PASSWORD: PASSWORD}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert config_entry.data[CONF_USERNAME] == "new.login@example.com"

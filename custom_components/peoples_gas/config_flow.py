@@ -108,10 +108,16 @@ class PeoplesGasConfigFlow(ConfigFlow, domain=DOMAIN):
                 # the portal hid it this time (the lookup fell back to the username), or
                 # hid it at setup, don't block re-entering the password.
                 fallback = _fallback_account(data[CONF_USERNAME])
+                same_username = fallback == _fallback_account(entry.data[CONF_USERNAME])
                 if account != fallback and entry.unique_id != _fallback_account(entry.data[CONF_USERNAME]):
                     await self.async_set_unique_id(account)
                     self._abort_if_unique_id_mismatch(reason="wrong_account")
-                return self.async_update_reload_and_abort(entry, data=data)
+                elif not same_username:
+                    # Without account numbers to compare, a different username could be a
+                    # different account, whose bills would land in this entry's statistics.
+                    errors = {CONF_USERNAME: "username_changed"}
+                if not errors:
+                    return self.async_update_reload_and_abort(entry, data=data)
         return self.async_show_form(
             step_id="reauth_confirm",
             data_schema=vol.Schema(

@@ -20,7 +20,8 @@
     "error": {
       "cannot_connect": "Failed to connect",
       "invalid_auth": "Invalid authentication",
-      "unknown": "Unexpected error"
+      "unknown": "Unexpected error",
+      "username_changed": "The portal didn't show an account number, so this can't be confirmed as the same account. Keep the username this entry was set up with, or add the other account as a new entry."
     },
     "abort": {
       "already_configured": "Account is already configured",
