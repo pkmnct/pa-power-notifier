@@ -105,18 +105,21 @@ def market() -> Generator[FakeMarket]:
 
 
 async def add_usage(hass: HomeAssistant, months: int = 24, unit: str = UnitOfVolume.CENTUM_CUBIC_FEET) -> None:
-    """Monthly gas use as an external statistic, like the peoples_gas integration makes."""
+    """
+    Monthly gas use as an external statistic, like the peoples_gas integration makes: one
+    complete cycle per row on the 1st, this month's included.
+    """
     now = dt_util.now()
     year, month = now.year, now.month
     starts = []
-    for _ in range(months + 1):  # includes the current (partial) month, which must be ignored
+    for _ in range(months + 1):  # includes this month's cycle, which counts
         starts.append((year, month))
         month -= 1
         if month == 0:
             year, month = year - 1, 12
     rows, total = [], 0.0
     for y, m in reversed(starts):
-        ccf = MONTHLY_MCF[m] * 10 * (5 if (y, m) == (now.year, now.month) else 1)
+        ccf = MONTHLY_MCF[m] * 10
         total += ccf
         start = dt_util.as_utc(datetime(y, m, 1, tzinfo=dt_util.get_default_time_zone()))
         rows.append({"start": start, "state": ccf, "sum": total})

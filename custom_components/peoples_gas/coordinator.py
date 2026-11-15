@@ -274,7 +274,10 @@ class PeoplesGasCoordinator(DataUpdateCoordinator[PeoplesGasData]):
 
     async def _insert_statistics(self, data: PeoplesGasData) -> None:
         """Import new billing cycles as external statistics (backfills on first run)."""
-        consumption_id, cost_id = statistic_ids(data.account)
+        # The account captured at setup, not this poll's lookup: one bad page load (the
+        # lookup falls back to the username) must not start a second statistic series.
+        account = self.config_entry.unique_id or data.account
+        consumption_id, cost_id = statistic_ids(account)
         tz = ZoneInfo(UTILITY_TIME_ZONE)
         recorder = get_instance(self.hass)
 
@@ -295,7 +298,7 @@ class PeoplesGasCoordinator(DataUpdateCoordinator[PeoplesGasData]):
         consumption, cost = build_statistics(
             data.usage, tz, last_start, last_sum, last_cost_start, last_cost_sum
         )
-        name = f"Peoples Gas {data.account}"
+        name = f"Peoples Gas {account}"
         if consumption:
             async_add_external_statistics(
                 self.hass,
@@ -328,5 +331,5 @@ class PeoplesGasCoordinator(DataUpdateCoordinator[PeoplesGasData]):
             "Imported %d consumption and %d cost rows for %s",
             len(consumption),
             len(cost),
-            data.account,
+            account,
         )

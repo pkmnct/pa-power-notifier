@@ -226,3 +226,21 @@ async def test_unload(
     await _setup(hass, config_entry)
     assert await hass.config_entries.async_unload(config_entry.entry_id)
     assert config_entry.state is ConfigEntryState.NOT_LOADED
+
+
+async def test_account_lookup_failure_keeps_statistic_ids(
+    hass: HomeAssistant, portal: FakePortal, config_entry: MockConfigEntry
+) -> None:
+    """One poll where the bill dashboard hides the account number must not start a new series."""
+    await _setup(hass, config_entry)
+    before = (await _stats(hass))[CONSUMPTION_ID]
+
+    portal.account = ""  # lookup fails: the client falls back to the username
+    portal.add_cycle(4, 2026, 3.0, "2026-04-17", 40.0, "800000000004")
+    await _poll(hass, config_entry)
+
+    ids = await hass.async_add_executor_job(lambda: set(get_metadata(hass)))
+    assert ids == {CONSUMPTION_ID, COST_ID}
+    after = (await _stats(hass))[CONSUMPTION_ID]
+    assert len(after) == len(before) + 1
+    assert after[-1]["sum"] == pytest.approx(before[-1]["sum"] + 30.0)  # 3 Mcf = 30 CCF

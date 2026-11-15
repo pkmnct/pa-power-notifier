@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from custom_components.duquesne_collector.const import COST_GRACE, DOMAIN
+from custom_components.duquesne_collector.const import CONF_STATISTIC_KEY, COST_GRACE, DOMAIN
 from custom_components.duquesne_collector.coordinator import (
     Point,
     build_statistics,
@@ -14,7 +14,9 @@ from custom_components.duquesne_collector.coordinator import (
     usage_points,
 )
 from homeassistant.components.recorder.statistics import statistics_during_period
-from homeassistant.config_entries import ConfigEntryState
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
+from homeassistant.const import CONF_API_TOKEN
+from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
@@ -148,12 +150,60 @@ async def test_unreachable(hass: HomeAssistant, collector: FakeCollector, config
     assert hass.states.get(S + "electric_supplier").state == "Example Energy of PA LLC"
 
 
-async def test_token_rejected_retries_setup(hass: HomeAssistant, collector: FakeCollector, config_entry) -> None:
+async def test_token_rejected_at_setup_starts_reauth(hass: HomeAssistant, collector: FakeCollector, config_entry) -> None:
     collector.reject_auth = True
     config_entry.add_to_hass(hass)
     await hass.config_entries.async_setup(config_entry.entry_id)
     await hass.async_block_till_done()
-    assert config_entry.state is ConfigEntryState.SETUP_RETRY
+    assert config_entry.state is ConfigEntryState.SETUP_ERROR
+    flows = hass.config_entries.flow.async_progress()
+    assert [f["context"]["source"] for f in flows] == [SOURCE_REAUTH]
+
+
+async def test_token_rotated_later_is_reauth_not_unreachable(
+    hass: HomeAssistant, collector: FakeCollector, config_entry
+) -> None:
+    await _setup(hass, config_entry)
+    config_entry.runtime_data._failing_since = dt_util.utcnow() - timedelta(hours=25)  # noqa: SLF001
+    collector.reject_auth = True
+    await _poll(hass, config_entry)
+    assert issues(hass) == []  # it answers; it isn't unreachable
+    flows = hass.config_entries.flow.async_progress()
+    assert [f["context"]["source"] for f in flows] == [SOURCE_REAUTH]
+
+    collector.reject_auth = False
+    result = await hass.config_entries.flow.async_configure(flows[0]["flow_id"], {CONF_API_TOKEN: "rotated"})
+    await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.ABORT and result["reason"] == "reauth_successful"
+    assert config_entry.data[CONF_API_TOKEN] == "rotated"
+    assert config_entry.data[CONF_STATISTIC_KEY] == "duquesne_light"
+    assert config_entry.state is ConfigEntryState.LOADED
+
+
+async def test_no_cost_yet_does_not_refetch_everything_hourly(
+    hass: HomeAssistant, collector: FakeCollector, config_entry
+) -> None:
+    for h in collector.hourly:
+        h["cost"] = None  # this account's hours are never priced
+    collector.daily = [dict(d, cost=None) for d in collector.daily]
+    await _setup(hass, config_entry)
+    assert COST_ID not in await _stats(hass)
+    collector.add_hours(2)
+    await _poll(hass, config_entry)
+    assert collector.usage_starts[0] == "2000-01-01"
+    assert collector.usage_starts[1].endswith("Z")  # only new hours
+    stats = await _stats(hass)
+    assert len(stats[CONSUMPTION_ID]) == DAILY_ONLY + HOURS + 2
+    assert COST_ID not in stats
+
+    # Opower finally prices the archive: the next daily full fetch backfills cost from the start.
+    collector.price_all()
+    collector.daily = [dict(d, cost=7.5) for d in collector.daily]
+    config_entry.runtime_data._last_full_fetch = dt_util.utcnow() - timedelta(hours=25)  # noqa: SLF001
+    await _poll(hass, config_entry)
+    assert collector.usage_starts[-1] == "2000-01-01"
+    stats = await _stats(hass)
+    assert len(stats[COST_ID]) == len(stats[CONSUMPTION_ID])
 
 
 async def test_remove_clears_issues(hass: HomeAssistant, collector: FakeCollector, config_entry) -> None:

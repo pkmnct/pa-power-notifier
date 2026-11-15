@@ -20,6 +20,10 @@ REQUEST_TIMEOUT = 60  # first run pulls every archived hour
 # this long are given up on, so the cost statistic can move past them.
 COST_GRACE = timedelta(days=7)
 
+# With no cost rows yet, the whole archive is re-read at most this often to find priced
+# hours; hourly polls otherwise fetch only new hours.
+FULL_FETCH_EVERY = timedelta(hours=24)
+
 # The collector runs daily; past this without a success something is wrong.
 STALE_AFTER = timedelta(hours=36)
 UNREACHABLE_AFTER = timedelta(hours=24)

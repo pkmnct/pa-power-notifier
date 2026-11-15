@@ -27,6 +27,7 @@ from homeassistant.components.recorder.statistics import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_API_TOKEN, CONF_URL, UnitOfEnergy
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -38,6 +39,7 @@ from .const import (
     CONF_STATISTIC_KEY,
     COST_GRACE,
     DOMAIN,
+    FULL_FETCH_EVERY,
     ISSUE_AUTH,
     ISSUE_STALE,
     ISSUE_UNREACHABLE,
@@ -174,6 +176,7 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
             async_get_clientsession(hass), entry.data[CONF_URL], entry.data.get(CONF_API_TOKEN)
         )
         self._failing_since: datetime | None = None
+        self._last_full_fetch: datetime | None = None
 
     def _issue_id(self, kind: str) -> str:
         return f"{kind}_{self.config_entry.entry_id}"
@@ -199,10 +202,10 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
             bills = await self.client.bills()
             imported = await self._import_usage()
         except CollectorAuthError as err:
-            # A token problem between HA and the collector: the user fixes it in the
-            # integration, so this is an error, not something to retry quietly.
-            self._track_unreachable(True)
-            raise UpdateFailed(f"{err}; update the API token in the integration") from err
+            # The collector answers but rejects our token (rotated on the add-on): start
+            # reauth so the user can enter the new one. It isn't unreachable.
+            self._track_unreachable(False)
+            raise ConfigEntryAuthFailed(f"{err}; enter the collector's current API token") from err
         except CollectorError as err:
             self._track_unreachable(True)
             raise UpdateFailed(str(err)) from err
@@ -264,15 +267,32 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
 
         last_start, last_sum = await last(consumption_id)
         last_cost_start, last_cost_sum = await last(cost_id)
+        now = dt_util.utcnow()
         backfill = last_start is None
-        starts = [s for s in (last_start, last_cost_start) if s is not None]
-        fetch_from = None if backfill or len(starts) < 2 else min(starts) + timedelta(hours=1)
+        import_cost = True
+        if backfill:
+            fetch_from = None
+        elif last_cost_start is not None:
+            fetch_from = min(last_start, last_cost_start) + timedelta(hours=1)
+        elif self._last_full_fetch is None or now - self._last_full_fetch >= FULL_FETCH_EVERY:
+            fetch_from = None  # no cost rows yet: look for priced hours across the archive
+        else:
+            # Cost statistic still empty (Opower hasn't priced anything): fetch only new
+            # hours, and leave cost to the daily full fetch so it can backfill from the start.
+            fetch_from = last_start + timedelta(hours=1)
+            import_cost = False
+        if fetch_from is None:
+            self._last_full_fetch = now
         body = await self.client.usage(fetch_from)
 
-        points = usage_points(body, backfill)
+        # Any full fetch includes the daily-only older days: consumption already has them
+        # (it only takes rows after its last one), but a late cost backfill needs them.
+        points = usage_points(body, backfill=fetch_from is None)
         consumption, cost = build_statistics(
-            points, last_start, last_sum, last_cost_start, last_cost_sum, dt_util.utcnow()
+            points, last_start, last_sum, last_cost_start, last_cost_sum, now
         )
+        if not import_cost:
+            cost = []
         name = self.config_entry.title
         if consumption:
             async_add_external_statistics(

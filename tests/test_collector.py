@@ -90,10 +90,24 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(body["current"]["supply_rate_per_kwh"], 0.1371)
 
     def test_next_run(self):
-        now = datetime(2026, 11, 15, 5, 0, tzinfo=EDT)
+        now = datetime(2026, 11, 15, 5, 0).astimezone()  # local (America/New_York, EST)
         self.assertEqual(col.Collector.next_after(now, [(4, 30), (16, 0)]).hour, 16)
         nxt = col.Collector.next_after(now, [(4, 30)])
         self.assertEqual((nxt.day, nxt.hour, nxt.minute), (16, 4, 30))
+
+    def test_next_run_across_dst(self):
+        # `now` carries a fixed offset, as _now() returns; the next run must use the
+        # offset of its own date.
+        fall = datetime(2026, 10, 31, 23, 0).astimezone()  # EDT; DST ends Nov 1, 02:00
+        nxt = col.Collector.next_after(fall, [(4, 30)])
+        self.assertEqual((nxt.month, nxt.day, nxt.hour, nxt.minute), (11, 1, 4, 30))
+        self.assertEqual(nxt.utcoffset(), timedelta(hours=-5))
+        self.assertEqual(nxt - fall, timedelta(hours=6, minutes=30))
+
+        spring = datetime(2026, 3, 7, 23, 0).astimezone()  # EST; DST starts Mar 8, 02:00
+        nxt = col.Collector.next_after(spring, [(4, 30)])
+        self.assertEqual((nxt.day, nxt.hour, nxt.minute, nxt.utcoffset()), (8, 4, 30, timedelta(hours=-4)))
+        self.assertEqual(nxt - spring, timedelta(hours=4, minutes=30))
 
     def test_bearer_token(self):
         os.environ["DATA_DIR"] = self.tmp.name

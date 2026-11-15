@@ -440,15 +440,10 @@ def decide_electric(
     ranked.sort(key=lambda o: o.annual_supply_usd if annual_kwh > 0 else (o.unit_price or 9e9))
 
     rec, switch, pct, savings = pick_recommended(ranked, stay, threshold_pct)
-    # TOU forces a switch only when it clears the same threshold on the shared leaderboard.
-    if rec and rec.is_tou and stay and stay.annual_supply_usd > 0:
-        tou_sav = stay.annual_supply_usd - rec.annual_supply_usd
-        tou_pct = 100.0 * tou_sav / stay.annual_supply_usd
-        d.tou_recommended = tou_sav > 0 and tou_pct >= threshold_pct
-        if d.tou_recommended:
-            switch, savings, pct = True, tou_sav, tou_pct
-    elif tou_result is not None:
-        d.tou_recommended = False
+    # Time-of-Use sits on the same leaderboard, so pick_recommended already applied the
+    # threshold to it: it's recommended exactly when it's the switch it picked.
+    if tou_result is not None:
+        d.tou_recommended = bool(rec is not None and rec.is_tou and switch)
 
     d.ranked, d.stay, d.recommended = ranked, stay, rec
     d.recommend_switch, d.savings_pct, d.savings_annual_usd = switch, pct, savings

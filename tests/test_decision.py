@@ -190,3 +190,14 @@ class DecideElectricTests(unittest.TestCase):
         d = decide_electric(E_OFFERS, usage=None, current=CurrentPlan("Mine", 0.15), price_to_compare=0.14, threshold_pct=5.0)
         self.assertEqual(d.annual_kwh, 0)
         self.assertIn(("warning", "Ranked by listed $/kWh because annual kWh is unknown."), d.notes)
+
+
+class GasPriceToCompareTests(unittest.TestCase):
+    def test_uses_the_configured_service_type(self):
+        from unittest.mock import patch
+
+        from energy_shopper_core.markets import pa
+
+        with patch.object(pa, "scrape_pagasswitch_price_to_compare", return_value=(3.5, "mcf")) as scrape:
+            pa.PaGasSwitch("1234", service_type="commercial", zipcode="15222").price_to_compare()
+        self.assertEqual(scrape.call_args.kwargs.get("service_type"), "commercial")

@@ -365,10 +365,16 @@ class Collector:
 
     @staticmethod
     def next_after(now: datetime, times: List[Tuple[int, int]]) -> datetime:
-        for days in (0, 1):
-            day = now + timedelta(days=days)
+        """
+        The next HH:MM local time after `now`. Wall-clock times are built naive and then
+        given the local zone's offset for *that* date, so a run after a DST change
+        isn't an hour off (`now` carries a fixed offset).
+        """
+        wall = now.astimezone().replace(tzinfo=None)
+        for days in (0, 1, 2):
+            day = wall + timedelta(days=days)
             for h, m in times:
-                t = day.replace(hour=h, minute=m, second=0, microsecond=0)
+                t = day.replace(hour=h, minute=m, second=0, microsecond=0).astimezone()
                 if t > now:
                     return t
         raise AssertionError("unreachable")

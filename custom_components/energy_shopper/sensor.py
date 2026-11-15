@@ -63,7 +63,7 @@ def _recommendation_attrs(data: ShopperData) -> dict[str, Any]:
     d = data.decision
     return {
         "recommended": _offer_attrs(d.recommended),
-        "lock_in_note": d.lock_in_note,
+        "lock_in_note": d.lock_in_note if data.compared else None,
         "usage_summary": d.usage_summary or None,
         "usage_months" if data.fuel != FUEL_ELECTRIC else "usage_hours": data.usage_count,
         "current_supplier": data.current_supplier,

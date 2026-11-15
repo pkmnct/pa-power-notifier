@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import logging
 from typing import Any
 
@@ -74,6 +75,32 @@ class CollectorConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="user",
             data_schema=self.add_suggested_values_to_schema(SCHEMA, user_input or {}),
+            errors=errors,
+        )
+
+    async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> ConfigFlowResult:
+        """The collector rejected our token (it was changed on the add-on)."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        entry = self._get_reauth_entry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            data, errors = await self._validate({CONF_URL: entry.data[CONF_URL], **user_input})
+            if not errors:
+                return self.async_update_reload_and_abort(
+                    entry, data={**data, CONF_STATISTIC_KEY: entry.data[CONF_STATISTIC_KEY]}
+                )
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(CONF_API_TOKEN): selector.TextSelector(
+                        selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                    )
+                }
+            ),
+            description_placeholders={"url": entry.data[CONF_URL]},
             errors=errors,
         )
 

@@ -126,8 +126,16 @@ class ShopperData:
     updated: datetime = field(default_factory=dt_util.utcnow)
 
     @property
+    def compared(self) -> bool:
+        """
+        False when no switch/stay call was made: no usage or no baseline (no stay row),
+        or the market listed no offers at all, which is a site problem rather than news.
+        """
+        return self.offers_listed > 0 and self.decision.recommended is not None and self.decision.stay is not None
+
+    @property
     def recommendation(self) -> str:
-        if self.decision.recommended is None:
+        if not self.compared:
             return "unknown"
         return "switch" if self.decision.recommend_switch else "stay"
 
@@ -178,23 +186,36 @@ def monthly_usage_cycles(
     rows: list[dict[str, Any]], kind: str, therms_per_mcf: float, now: datetime
 ) -> list[decision.UsageCycle]:
     """
-    Monthly "change" rows (ft³ or kWh) → Mcf cycles. The current calendar month is
-    skipped: for daily or hourly sources it's only partly in.
+    Hourly "change" rows (ft³ or kWh) → one Mcf cycle per calendar month, summed here
+    rather than with the recorder's month roll-up, which drops rows starting on a DST
+    change day (Nov 1 2026, say).
+
+    The current month is dropped when the source reads daily or hourly (it's only partly
+    in), but kept for a billing-cycle source like peoples_gas, which writes each complete
+    cycle as one row on the 1st: there, this month's row is the newest bill.
     """
-    this_month = (now.year, now.month)
-    cycles = []
+    by_month: dict[tuple[int, int], float] = defaultdict(float)
+    days: dict[tuple[int, int], set] = defaultdict(set)
     for row in rows:
         change = row.get("change")
         if not change or change <= 0:
             continue
         start = dt_util.as_local(dt_util.utc_from_timestamp(row["start"]))
-        if (start.year, start.month) >= this_month:
+        key = (start.year, start.month)
+        by_month[key] += change
+        days[key].add(start.date())
+    this_month = (now.year, now.month)
+    past = sorted(len(d) for key, d in days.items() if key < this_month)
+    cycle_source = bool(past) and past[len(past) // 2] <= 2  # median month has 1–2 readings
+    cycles = []
+    for (year, month), change in sorted(by_month.items()):
+        if (year, month) > this_month or ((year, month) == this_month and not cycle_source):
             continue
         if kind == "volume":
             mcf = change / 1000.0  # ft³ → Mcf
         else:
             mcf = change / KWH_PER_THERM / therms_per_mcf  # kWh → therms → Mcf
-        cycles.append(decision.UsageCycle(usage_mcf=mcf, month=start.month, year=start.year))
+        cycles.append(decision.UsageCycle(usage_mcf=mcf, month=month, year=year))
     return cycles
 
 
@@ -412,6 +433,8 @@ class EnergyShopperCoordinator(DataUpdateCoordinator[ShopperData]):
             raise UpdateFailed(f"Error fetching PA Gas Switch offers: {err}") from err
 
         notes: list[tuple[str, str]] = []
+        if not market.offers:
+            notes.append(("warning", "PA Gas Switch listed no offers this time; no recommendation until it does."))
         unit = data.get(CONF_PRICE_UNIT) or (market.price_to_compare or (None, None))[1] or self._unit
         if not unit:
             raise UpdateFailed(
@@ -425,7 +448,7 @@ class EnergyShopperCoordinator(DataUpdateCoordinator[ShopperData]):
             ptc_price, ptc_unit = market.price_to_compare
             ptc = decision.convert_gas_price(ptc_price, ptc_unit, unit, therms_per_mcf)
 
-        rows, kind = await self._read_statistic(notes, "month", USAGE_LOOKBACK_DAYS, ("volume", "energy"))
+        rows, kind = await self._read_statistic(notes, "hour", USAGE_LOOKBACK_DAYS, ("volume", "energy"))
         usage = monthly_usage_cycles(rows, kind, therms_per_mcf, dt_util.now()) if kind else []
         baseline, source = self._gas_baseline(unit, ptc, therms_per_mcf, notes)
 
@@ -467,6 +490,8 @@ class EnergyShopperCoordinator(DataUpdateCoordinator[ShopperData]):
             raise UpdateFailed(f"Error fetching PA Power Switch offers: {err}") from err
 
         notes: list[tuple[str, str]] = []
+        if not market.offers:
+            notes.append(("warning", "PA Power Switch listed no offers this time; no recommendation until it does."))
         rows, kind = await self._read_statistic(notes, "hour", HOURLY_LOOKBACK_DAYS, ("energy",))
         records = hourly_records(rows) if kind else []
         usage = usage_window(records, f"hourly kWh from {self._opt(CONF_USAGE_STATISTIC)}")
@@ -623,9 +648,11 @@ class EnergyShopperCoordinator(DataUpdateCoordinator[ShopperData]):
         key = shopper.recommendation
         if key == "switch" and rec is not None:
             key = f"switch:{rec.supplier}:{rec.plan_type}"
+        if shopper.recommendation == "unknown":
+            return  # keep the last real recommendation, so it coming back isn't news
         previous = self._state.get("recommendation_key")
         self._state["recommendation_key"] = key
-        if key == previous or shopper.recommendation == "unknown":
+        if key == previous:
             return
         if previous is None and shopper.recommendation != "switch":
             return  # first run: only worth an event if there's something to do

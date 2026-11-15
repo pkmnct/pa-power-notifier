@@ -20,6 +20,8 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
+from datetime import timedelta
+
 from homeassistant.util import dt as dt_util
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_capture_events
@@ -62,7 +64,7 @@ async def test_switch_recommendation(hass: HomeAssistant, market: FakeMarket, co
     rec = state(hass, "gas_recommendation")
     assert rec.state == "switch"
     assert rec.attributes["recommended"]["supplier"] == "Welcome Gas"
-    assert rec.attributes["usage_months"] == 24  # the current partial month is skipped
+    assert rec.attributes["usage_months"] == 25  # a billing-cycle source keeps this month's cycle
     assert rec.attributes["baseline_source"] == "Price to Compare"
 
     assert state(hass, "best_gas_offer").state == "Welcome Gas"
@@ -197,6 +199,8 @@ async def test_unavailable_rate_sensor_falls_back(hass: HomeAssistant, market: F
 async def test_no_usage_ranks_by_price(hass: HomeAssistant, market: FakeMarket, config_entry) -> None:
     await _setup(hass, config_entry)  # the statistic doesn't exist
     rec = state(hass, "gas_recommendation")
+    assert rec.state == "unknown"  # nothing to compare: no usage, so no stay row
+    assert rec.attributes["lock_in_note"] is None
     assert any("not found" in n for n in rec.attributes["notes"])
     assert any("Ranked by listed $/mcf" in n for n in rec.attributes["notes"])
     assert state(hass, "best_gas_offer").state == "Welcome Gas"
@@ -229,14 +233,61 @@ async def test_remove_entry_clears_issues(hass: HomeAssistant, market: FakeMarke
     assert issues(hass, "cheaper_gas_supplier") == []
 
 
-def test_monthly_cycles_energy_and_partial_month() -> None:
+def _day_rows(starts_and_changes):
+    return [{"start": dt_util.as_utc(t).timestamp(), "change": c} for t, c in starts_and_changes]
+
+
+def test_monthly_cycles_daily_source_drops_partial_month() -> None:
     now = dt_util.now()
-    this_month = dt_util.as_utc(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0))
-    rows = [
-        {"start": dt_util.as_utc(this_month.replace(year=this_month.year - 1)).timestamp(), "change": 1033.0 * 29.3071 / 10},
-        {"start": this_month.timestamp(), "change": 500.0},
-        {"start": 0.0, "change": None},
-    ]
+    first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    last_month = (first - timedelta(days=1)).replace(day=1)
+    rows = _day_rows(
+        [(last_month + timedelta(days=d), 1033.0 * 29.3071 / 10 / 28) for d in range(28)]  # kWh
+        + [(first, 500.0), (first + timedelta(hours=30), 500.0)]
+    )
     cycles = monthly_usage_cycles(rows, "energy", 10.33, now)
-    assert len(cycles) == 1
+    assert [(c.month, c.year) for c in cycles] == [(last_month.month, last_month.year)]
     assert cycles[0].usage_mcf == pytest.approx(10.0)
+
+
+def test_monthly_cycles_billing_source_keeps_this_month() -> None:
+    now = dt_util.now()
+    first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    starts = [first]
+    for _ in range(5):
+        starts.insert(0, (starts[0] - timedelta(days=1)).replace(day=1))
+    cycles = monthly_usage_cycles(_day_rows([(t, 4000.0) for t in starts] + [(first, None)]), "volume", 10.37, now)
+    assert len(cycles) == 6
+    assert (cycles[-1].month, cycles[-1].year) == (now.month, now.year)
+    assert cycles[-1].usage_mcf == pytest.approx(4.0)
+
+
+async def test_no_baseline_is_unknown(hass: HomeAssistant, market: FakeMarket, config_entry) -> None:
+    await add_usage(hass)
+    market.price_to_compare = None
+    entry = MockConfigEntry(
+        domain=DOMAIN, title=config_entry.title, unique_id=config_entry.unique_id,
+        data={**config_entry.data, "price_unit": "mcf"}, options=config_entry.options,
+    )
+    await _setup(hass, entry)
+    rec = state(hass, "gas_recommendation")
+    assert rec.state == "unknown"
+    assert any("No current rate or Price to Compare" in n for n in rec.attributes["notes"])
+    assert issues(hass, "cheaper_gas_supplier") == []
+
+
+async def test_unknown_refresh_does_not_repeat_switch_event(
+    hass: HomeAssistant, market: FakeMarket, config_entry
+) -> None:
+    await add_usage(hass)
+    events = async_capture_events(hass, EVENT_RECOMMENDATION_CHANGED)
+    await _setup(hass, config_entry)
+    assert [e.data["supplier"] for e in events] == ["Welcome Gas"]
+    offers = market.offers
+    market.offers = []  # one refresh with nothing listed
+    await _poll(hass, config_entry)
+    assert state(hass, "gas_recommendation").state == "unknown"
+    market.offers = offers
+    await _poll(hass, config_entry)
+    assert state(hass, "gas_recommendation").state == "switch"
+    assert [e.data["supplier"] for e in events] == ["Welcome Gas"]  # no repeat

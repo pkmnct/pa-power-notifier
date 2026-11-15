@@ -177,7 +177,9 @@ class PaGasSwitch:
         return OfferListing(offers, resp.text)
 
     def price_to_compare(self) -> Optional[Tuple[float, str]]:
-        return scrape_pagasswitch_price_to_compare(self.distributor_id, self.zipcode, self._session)
+        return scrape_pagasswitch_price_to_compare(
+            self.distributor_id, self.zipcode, self._session, service_type=self.service_type
+        )
 
 
 _GAS_PTC_RE = re.compile(
