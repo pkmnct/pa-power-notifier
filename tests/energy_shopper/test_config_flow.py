@@ -42,6 +42,7 @@ async def test_full_flow(hass: HomeAssistant, market: FakeMarket) -> None:
     assert result["data"] == {CONF_ZIPCODE: ZIP, CONF_DISTRIBUTOR: DISTRIBUTOR, CONF_SERVICE_TYPE: "residential"}
     assert result["options"] == SETTINGS  # the blank prior_suppliers is dropped
     assert result["result"].unique_id == f"gas_{DISTRIBUTOR}_{ZIP}_residential"
+    await hass.async_block_till_done()  # let the new entry finish setting up before teardown
 
 
 async def test_cannot_connect(hass: HomeAssistant, market: FakeMarket) -> None:

@@ -1,6 +1,6 @@
 # Home Assistant integration: design draft
 
-Status: draft for discussion, 2026-11-14. Step 1 of the build order is partly done (see "Step 1 progress"); steps 2 and 3 are built and tested offline (see "Step 2 progress" and "Step 3 progress"), not yet run in a live Home Assistant. Step 4's Duquesne collector is built (see "Step 4 progress"); its `duquesne_light` integration is not.
+Status: draft for discussion, 2026-11-14. Step 1 of the build order is partly done (see "Step 1 progress"); steps 2 and 3 are built and tested offline (see "Step 2 progress" and "Step 3 progress"), not yet run in a live Home Assistant. Step 4's Duquesne collector and its `duquesne_collector` integration are built (see "Step 4 progress").
 
 ## Goal
 
@@ -225,8 +225,8 @@ Switch has no distributor list endpoint we use yet.
 
 ## Step 4 progress
 
-The Duquesne collector is built in `collector/` (2026-11-15); the thin `duquesne_light`
-integration that consumes it is not.
+The Duquesne collector is built in `collector/` (2026-11-15), and so is the thin
+integration that consumes it, `custom_components/duquesne_collector/` (see below).
 
 - `collector/collector.py`: one process with the daily fetch (hourly backfill, daily
   usage, newest bill plus any not yet archived, into the existing merge-only archive)
@@ -244,9 +244,26 @@ the way Supervisor runs an add-on (root start, `/data/options.json`, token); one
 fetch in the container through headless Chromium. Not checked: a real Supervisor install.
 The add-on's `image` (`ghcr.io/pkmnct/pa-power-notifier-collector`) is not published yet.
 
+**Integration (`duquesne_collector`).** The domain matches the add-on slug; `duquesne_light`
+is taken by the core stub that points at Opower. Plain aiohttp to the collector, no
+vendored core. Offline Home Assistant tests in `tests/duquesne_collector/` (15 tests: fake
+collector behind `aioclient_mock`); the client and statistics code were also run against
+the real collector serving a copy of the archive.
+
+| Piece | What it does |
+|---|---|
+| Config flow | Collector URL (default `http://localhost:8765`, which reaches the add-on's published port from HA OS) and optional API token, checked against `/status` (`cannot_connect`, `invalid_auth`, `not_collector`). Reconfigure changes URL or token and keeps the statistic ids, which are fixed at setup (`duquesne_light`, then `duquesne_light_2`, …) |
+| Statistics | External `duquesne_collector:<key>_energy_consumption` (kWh) and `_energy_cost` (USD), polled hourly. First run backfills every archived hour, plus daily totals at local midnight for older days with no hourly data. Each statistic continues from its own last row; cost waits at the first hour Opower hasn't priced, and gives up on hours still unpriced after 7 days |
+| Sensors | From the newest bill: supplier (`Duquesne Light default service` when there's none), supply rate and Price to Compare ($/kWh), bill amount, date, kWh and supply charges. Diagnostics: collector last success (status as attributes) and usage data through |
+| Repair issues | Collector login failing (`last_error.type == "auth"` newer than the last success); no success for 36 h; collector unreachable for 24 h. Each clears itself on recovery |
+
+Live against the archive copy: 10,290 hourly rows (Aug 2025 → Nov 2026, 12,849 kWh), 9,978
+priced (312 old hours Opower never priced are skipped), newest bill's supplier and rates
+read correctly. Not run in a live HA.
+
 ## Open questions
 
-- **Names.** `energy_shopper` is a placeholder. `duquesne_light` collides with the core stub domain of the same name that points at Opower; ours needs a different domain (e.g. `duquesne_light_bills`).
+- **Names.** `energy_shopper` is a placeholder. Duquesne's integration is `duquesne_collector` (matches the add-on slug; `duquesne_light` is the core Opower stub).
 - **Duquesne usage: ours or Opower's?** If core Opower works for some users, should our integration skip usage and only add supplier and bills? Simplest is to always provide both from the collector.
 - **Statistic IDs.** External statistics (`peoples_gas:...`) versus entity-backed ones. External is what Opower does and avoids fake "sensor" state; needs a check that the decision layer's source picker handles them.
 - **Gas units.** The portal reports Mcf, HA's Energy dashboard wants CCF or m³, offers are priced per Mcf/ccf/therm depending on the utility. Conversion belongs in the core library, once. (Mcf → CCF is now in `core.gas`; therms were already there.)

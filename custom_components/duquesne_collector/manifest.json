@@ -1,0 +1,13 @@
+{
+  "domain": "duquesne_collector",
+  "name": "Duquesne Light (collector)",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": ["recorder"],
+  "documentation": "https://github.com/pkmnct/pa-power-notifier/blob/main/collector/README.md",
+  "integration_type": "service",
+  "iot_class": "local_polling",
+  "loggers": ["custom_components.duquesne_collector"],
+  "requirements": [],
+  "version": "0.1.0"
+}
