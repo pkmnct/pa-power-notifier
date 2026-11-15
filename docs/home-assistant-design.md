@@ -1,6 +1,6 @@
 # Home Assistant integration: design draft
 
-Status: draft for discussion, 2026-11-14. Step 1 of the build order is partly done (see "Step 1 progress"); step 2 is built and tested offline (see "Step 2 progress"), not yet run in a live Home Assistant.
+Status: draft for discussion, 2026-11-14. Step 1 of the build order is partly done (see "Step 1 progress"); step 2 is built and tested offline (see "Step 2 progress"), not yet run in a live Home Assistant. Step 4's Duquesne collector is built (see "Step 4 progress"); its `duquesne_light` integration is not.
 
 ## Goal
 
@@ -146,15 +146,13 @@ against archived data, and live PA Power/Gas Switch fetches returning identical 
 | `energy_shopper_core.tou` | `tou_analyzer.py` (`HourlyUsageStore` moved to `usage_archive.py`) |
 | `energy_shopper_core.report` | `check_report.py` |
 | `energy_shopper_core.utilities.peoples_gas` (client, parsers, `fetch_all_usage`, `analyze`; login failures raise `PeoplesGasAuthError`) | `peoples_gas_analyzer.py`, which remains as the wrapper for env credentials, file mode and bill archiving. Checked live: usage, analysis, bill list and two re-downloaded bill PDFs identical to `main` |
+| `energy_shopper_core.utilities.duquesne` (`DuquesneClient`: login, Opower token, daily and hourly GraphQL, account discovery; response parsers; bill-PDF EGS parser. Bad or missing credentials raise `DuquesneAuthError`, a token kept behind the bot wall raises `DuquesneBlockedError`; the browser fetch for the token page is passed in as `html_fetcher`) | `duquesne_light_analyzer.py`, which remains as the wrapper for env credentials, the Puppeteer path (`browser_fetch.py`), file mode, bill-PDF downloads and bill archiving. Offline notifier runs (file mode, and no credentials) give byte-identical reports, logs and archives to the branch base |
 
 The package has no environment reads, file access or imports from the rest of the repo.
 `make unit-test` runs its offline tests.
 
 Still to do in step 1:
 
-- **Duquesne client.** The Opower and bill-parsing parts of `duquesne_light_analyzer.py`
-  are not in the package yet. They mix HTTP, the browser fallback, environment reads and
-  archive writes; the browser part stays out of the package (it belongs to the collector).
 - **Orchestration.** `recommendation_engine.build_check_report` still gathers data,
   archives it and builds the report in one function. The HA decision layer needs the
   "inputs in, sections out" middle of it as a core function.
@@ -196,6 +194,27 @@ Still to check live: the statistics in the Energy dashboard; whether
 `_account_number()` (a private client method the integration calls) finds the hidden
 input on every account; the portal's behaviour with two polls a day; hassfest/HACS
 validation (not run).
+
+## Step 4 progress
+
+The Duquesne collector is built in `collector/` (2026-11-15); the thin `duquesne_light`
+integration that consumes it is not.
+
+- `collector/collector.py`: one process with the daily fetch (hourly backfill, daily
+  usage, newest bill plus any not yet archived, into the existing merge-only archive)
+  and a read-only stdlib `http.server` API: `GET /usage?start=&end=`, `/bills`,
+  `/status`, `/health`. Optional bearer token (`COLLECTOR_API_TOKEN`). Shapes are in
+  `collector/README.md`.
+- One image: the root `Dockerfile` gained a `collector` target. The default target is
+  still the notifier, unchanged (same offline report from the built image).
+- Packaging: Compose service `duquesne-collector` (profile `collector`, so plain
+  `docker compose up` is unchanged) and a Home Assistant add-on (`collector/config.yaml`,
+  `run.sh` maps `/data/options.json` to env, root `repository.yaml`).
+
+Checked: unit tests; every endpoint against archived data, locally and in the image run
+the way Supervisor runs an add-on (root start, `/data/options.json`, token); one live
+fetch in the container through headless Chromium. Not checked: a real Supervisor install.
+The add-on's `image` (`ghcr.io/pkmnct/pa-power-notifier-collector`) is not published yet.
 
 ## Open questions
 
