@@ -26,10 +26,10 @@ from energy_shopper_core.ranking import (
     tou_option_from_analysis,
     tou_shift_option,
 )
+from energy_shopper_core.decision import Baseline, decide_gas
 from energy_shopper_core.report import CheckReport, RankedOption, UtilitySection
 from energy_shopper_core.seasons import (
     ELECTRIC_HIGH_USE_MONTHS,
-    GAS_HIGH_USE_MONTHS,
     MONTH_NAMES,
 )
 from energy_shopper_core.tou import TOUAnalyzer
@@ -39,7 +39,6 @@ from energy_shopper_core.usage import (
     span_days_from_hourly as _span_days_from_hourly,
 )
 from gas_usage_forecast import (
-    forecast_annual_from_calendar_profile,
     therms_per_gas_unit,
     therms_per_mcf,
 )
@@ -835,109 +834,55 @@ def build_check_report(checker: Any) -> CheckReport:
         current_blended_rate=current_gas * therms_per_unit if current_gas > 0 else None,
         supply_reference_rate=gas_ptc,
     )
-    annual_therms = 0.0
     gas_analysis = getattr(checker, "_last_gas_analysis", None)
     usage_list = (gas_analysis or {}).get("usage_data") or []
     # Merge live cycles into local gas archive; forecast from full history
     gas_path = getattr(checker, "gas_usage_file", None)
     usage_list = _archive_gas_usage(usage_list, path=gas_path)
-    if usage_list:
-        fc = forecast_annual_from_calendar_profile(
-            usage_list,
-            aggregator=os.environ.get("GAS_PROFILE_AGGREGATOR", "median"),
-        )
-        annual_therms = fc.annual_therms
-        sparse = [m for m, n in (fc.calendar_month_sample_counts or {}).items() if n < 2]
-        missing = [m for m in range(1, 13) if not (fc.calendar_month_sample_counts or {}).get(m)]
-        tpm = therms_per_mcf()
-        gas_section.usage_summary = (
-            f"{fc.method}: ~{fc.annual_mcf:.1f} MCF/yr → {annual_therms:,.0f} therms "
-            f"(THERMS_PER_MCF={tpm})"
-        )
-        if missing:
-            names = ", ".join(MONTH_NAMES[m] for m in missing)
-            gas_section.seasonal_coverage_note = (
-                f"No samples for calendar months {names}; filled with mean of observed months."
-            )
-            report.add_warning("warning", "gas", gas_section.seasonal_coverage_note)
-        high_sparse = [m for m in GAS_HIGH_USE_MONTHS if m in sparse or m in missing]
-        if high_sparse:
-            report.add_warning(
-                "warning",
-                "gas",
-                "Heating-season months have sparse or filled usage samples — lock-in advice is weaker.",
-            )
-    elif current_gas > 0:
-        monthly = checker.estimate_monthly_gas_therms()
-        if monthly:
-            annual_therms = monthly * 12
-            gas_section.usage_summary = f"Naive 12× monthly therms (~{annual_therms:,.0f}/yr)"
-            report.add_warning(
-                "warning",
-                "gas",
-                "Seasonal calendar-month forecast unavailable; used a flat monthly average.",
-            )
+    fallback_monthly = None
+    if not usage_list and current_gas > 0:
+        fallback_monthly = checker.estimate_monthly_gas_therms()
 
-    annual_gas_units = annual_therms / therms_per_unit if therms_per_unit else 0.0
-    if annual_gas_units > 0:
-        gas_section.annual_units = annual_gas_units
-        if gas_unit == "ccf":
-            gas_section.usage_summary += f" = {annual_gas_units:,.1f} {gas_unit}/yr"
-
-    # No supplier on People's bills to read; PRIOR_GAS_SUPPLIERS covers past suppliers.
-    gas_history = prior_suppliers(configured=os.getenv("PRIOR_GAS_SUPPLIERS", ""))
-    eligible_g = _drop_ineligible(gas_rates, gas_history, report, "gas")
-    filtered_g = checker.apply_filters(eligible_g)
-    if eligible_g and not filtered_g:
-        report.add_warning("warning", "gas", "Filters removed every gas offer.")
-    ranked_g: List[RankedOption] = []
-    if annual_gas_units > 0:
-        ranked_g = rank_plans_by_annual(filtered_g, annual_gas_units, gas_unit)
-    else:
-        for r in filtered_g:
-            p = r.get_numeric_price()
-            if p is None or p <= 0:
-                continue
-            ranked_g.append(rate_to_option(r, 0.0, gas_unit))
-        ranked_g.sort(key=lambda o: o.unit_price or 9e9)
-        if filtered_g:
-            report.add_warning(
-                "warning", "gas", f"Ranked by listed $/{gas_unit} because annual usage is unknown."
-            )
-
-    stay_g = None
     stay_price = gas_ptc or (current_gas * therms_per_unit if current_gas > 0 else None)
-    if stay_price and annual_gas_units > 0:
-        stay_g = RankedOption(
-            supplier="People's Gas",
+    baseline = None
+    if stay_price:
+        baseline = Baseline(
+            price=stay_price,
             plan_type=(
                 "Default service (Price to Compare)" if gas_ptc else "Current rate (bill-derived)"
             ),
-            unit=gas_unit,
-            annual_supply_usd=round(annual_gas_units * stay_price, 2),
-            unit_price=stay_price,
-            is_current_egs=True,
-            term_raw="Current",
             flags=[] if gas_ptc else ["bill-derived all-in rate includes delivery charges"],
         )
-        ranked_g.append(stay_g)
-        ranked_g.sort(key=lambda o: o.annual_supply_usd)
-
-    rec_g, switch_g, pct_g, sav_g = pick_recommended(ranked_g, stay_g, report.threshold_pct)
+    # No supplier on People's bills to read; PRIOR_GAS_SUPPLIERS covers past suppliers.
+    gas = decide_gas(
+        gas_rates,
+        unit=gas_unit,
+        usage=usage_list,
+        baseline=baseline,
+        threshold_pct=report.threshold_pct,
+        prior=prior_suppliers(configured=os.getenv("PRIOR_GAS_SUPPLIERS", "")),
+        no_cancellation_fee=getattr(checker, "filter_no_cancellation_fee", False),
+        renewable_only=getattr(checker, "filter_renewable_only", False),
+        fallback_monthly_therms=fallback_monthly,
+        therms_per_mcf=therms_per_mcf(),
+        aggregator=os.environ.get("GAS_PROFILE_AGGREGATOR", "median"),
+    )
+    for level, message in gas.notes:
+        report.add_warning(level, "gas", message)
+    gas_section.usage_summary = gas.usage_summary
+    if gas.seasonal_coverage_note:
+        gas_section.seasonal_coverage_note = gas.seasonal_coverage_note
+    if gas.annual_units > 0:
+        gas_section.annual_units = gas.annual_units
+    ranked_g = gas.ranked
     gas_section.ranked = ranked_g
-    gas_section.recommended = rec_g
-    gas_section.stay_option = stay_g
-    gas_section.recommend_switch = switch_g
-    gas_section.savings_pct = pct_g
-    gas_section.savings_annual_usd = sav_g
-    gas_section.lock_in_note = lock_in_note("gas", rec_g, stay_g, switch_g)
-    extras_g: List[Tuple[str, Optional[RankedOption]]] = []
-    if annual_gas_units > 0 and len(filtered_g) < len(eligible_g):
-        removed = rank_plans_by_annual([r for r in eligible_g if r not in filtered_g], annual_gas_units, gas_unit)
-        best_kept = min((o.annual_supply_usd for o in ranked_g if not o.is_current_egs), default=None)
-        if removed and (best_kept is None or removed[0].annual_supply_usd < best_kept):
-            extras_g.append(("Best your filters removed", removed[0]))
-    gas_section.highlights = best_by_category(ranked_g, "gas", extras=extras_g)
+    gas_section.recommended = gas.recommended
+    gas_section.stay_option = gas.stay
+    gas_section.recommend_switch = gas.recommend_switch
+    gas_section.savings_pct = gas.savings_pct
+    gas_section.savings_annual_usd = gas.savings_annual_usd
+    gas_section.lock_in_note = gas.lock_in_note
+    gas_section.highlights = gas.highlights
     gas_section.trend_note = trend_note(prior_history, "gas", ranked_g[0] if ranked_g else None)
     report.gas = gas_section
 

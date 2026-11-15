@@ -1,6 +1,6 @@
 # Home Assistant integration: design draft
 
-Status: draft for discussion, 2026-11-14. Step 1 of the build order is partly done (see "Step 1 progress"); step 2 is built and tested offline (see "Step 2 progress"), not yet run in a live Home Assistant. Step 4's Duquesne collector is built (see "Step 4 progress"); its `duquesne_light` integration is not.
+Status: draft for discussion, 2026-11-14. Step 1 of the build order is partly done (see "Step 1 progress"); steps 2 and 3 are built and tested offline (see "Step 2 progress" and "Step 3 progress"), not yet run in a live Home Assistant. Step 4's Duquesne collector is built (see "Step 4 progress"); its `duquesne_light` integration is not.
 
 ## Goal
 
@@ -153,9 +153,10 @@ The package has no environment reads, file access or imports from the rest of th
 
 Still to do in step 1:
 
-- **Orchestration.** `recommendation_engine.build_check_report` still gathers data,
-  archives it and builds the report in one function. The HA decision layer needs the
-  "inputs in, sections out" middle of it as a core function.
+- **Orchestration.** Done for gas: `energy_shopper_core.decision.decide_gas` is the
+  "inputs in, decision out" middle, and both the CLI and the `energy_shopper` integration
+  call it. Electric (with Time-of-Use) is still inline in
+  `recommendation_engine.build_check_report`; it moves with step 5.
 - **Utility names in the ranking code.** "Duquesne Light" and "People's Gas" labels are
   hard-coded in `ranking.py` (default-service detection, Time-of-Use rows). They need to
   become parameters before a second utility or state.
@@ -194,6 +195,33 @@ Still to check live: the statistics in the Energy dashboard; whether
 `_account_number()` (a private client method the integration calls) finds the hidden
 input on every account; the portal's behaviour with two polls a day; hassfest/HACS
 validation (not run).
+
+## Step 3 progress
+
+`custom_components/energy_shopper/` is built for gas, 2026-11-15, and passes offline Home
+Assistant tests (`tests/energy_shopper/`, 20 tests, same harness as step 2: fake PA Gas
+Switch, real recorder with an imported usage statistic). A live check fetched the real PA
+Gas Switch offers and Price to Compare through the integration's own code. Not yet run in
+a live HA instance.
+
+| Piece | What it does |
+|---|---|
+| Core | `energy_shopper_core.decision`: `decide_gas(offers, unit, usage, baseline, threshold, prior suppliers, filters)` returns ranked options, recommendation, savings, best-by-category, lock-in note and notes; `Baseline`, `UsageCycle`; gas price unit conversion (Mcf, ccf, therm, ft³, m³, and HA spellings like `USD/CCF`). The CLI's gas section now calls it; its text and HTML reports are unchanged against archived data and live PA Gas Switch |
+| Config flow | Step 1: ZIP, PA Gas Switch distributor id, service type, optional price unit; validated by fetching offers (`cannot_connect`, `no_offers`, `unknown_unit` when no Price to Compare tells the unit). Step 2: usage statistic, current-rate sensor or typed rate, threshold, no-cancellation-fee filter, prior suppliers. Options flow edits step 2 plus rate-jump % and heat content |
+| Usage | Monthly `change` of any volume or energy statistic (so `peoples_gas`, core Opower or a meter's own), read over 3 years, converted to Mcf; the current partial month is skipped |
+| Baseline | The rate sensor (converted from its unit), else the typed rate, else PA Gas Switch's Price to Compare; an unavailable sensor falls back with a note |
+| Sensors | Recommendation (`switch` / `stay` / `unknown`, with notes, lock-in and usage summary), best offer (supplier, details as attributes), best offer price, annual savings, savings %, current supply rate, Price to Compare, projected annual use, offers ranked (leaderboard and best-by-category as attributes) |
+| Repair issues | "Cheaper gas supplier: X" per recommended supplier, deleted when it stops being worth it; ignoring it silences that supplier only. "Your gas supply rate rose N%" when the sensor/typed rate jumps by the option's % (persistent, replaced by a newer jump) |
+| Event | `energy_shopper_recommendation_changed` when switch/stay or the recommended supplier changes (not for a first-run "stay"); state survives restarts in `.storage` |
+| Blueprint | `blueprints/automation/energy_shopper/notify_on_recommendation.yaml`: event → any notify action, "stay" optional; tested as a real automation |
+
+The integration vendors the core like `peoples_gas` (`scripts/vendor_core.py` now lists
+both). The daily market CSV archive is not in the integration yet.
+
+Still to check live: the flow and sensors in a real HA; the statistic picker with
+`peoples_gas` external statistics (the "Statistic IDs" question below); hassfest/HACS
+validation. Distributor and rate class are typed ids, not picked from lists: PA Gas
+Switch has no distributor list endpoint we use yet.
 
 ## Step 4 progress
 

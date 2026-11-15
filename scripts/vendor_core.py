@@ -30,6 +30,19 @@ VENDORED = {
         "utilities/__init__.py",
         "utilities/peoples_gas.py",
     ],
+    "energy_shopper": [
+        "__init__.py",
+        "decision.py",
+        "eligibility.py",
+        "gas.py",
+        "markets/__init__.py",
+        "markets/base.py",
+        "markets/pa.py",
+        "models.py",
+        "ranking.py",
+        "report.py",
+        "seasons.py",
+    ],
 }
 
 

@@ -1,0 +1,97 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Gas market",
+        "description": "Search your ZIP on pagasswitch.com and copy the `distributor=` number from the results page URL.",
+        "data": {
+          "zipcode": "ZIP code",
+          "distributor": "PA Gas Switch distributor id",
+          "service_type": "Service type",
+          "price_unit": "Price unit"
+        },
+        "data_description": {
+          "price_unit": "Leave blank to read it from the PA Gas Switch shop page (Peoples quotes per Mcf)."
+        }
+      },
+      "settings": {
+        "title": "Your usage and rate",
+        "description": "Pick the long-term statistic with your gas use (for example Peoples Gas consumption) and where your current supply rate comes from. With neither a sensor nor a value, the utility's Price to Compare is used.",
+        "data": {
+          "usage_statistic": "Gas usage statistic",
+          "current_rate_entity": "Current supply rate sensor",
+          "current_rate_value": "Current supply rate",
+          "current_rate_unit": "Unit of the rate you typed",
+          "threshold_pct": "Recommend switching at savings of at least",
+          "no_cancellation_fee": "Skip offers with a cancellation fee",
+          "prior_suppliers": "Suppliers you've used before"
+        },
+        "data_description": {
+          "current_rate_entity": "A sensor in USD per Mcf, ccf or therm, such as Peoples Gas Price to Compare. Takes precedence over a typed rate.",
+          "prior_suppliers": "Semicolon-separated, optionally with the date you left: `Name@YYYY-MM-DD; Other Name`. Their new-customer-only offers are skipped."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Couldn't reach PA Gas Switch.",
+      "no_offers": "PA Gas Switch lists no offers for that distributor and service type.",
+      "unknown_unit": "PA Gas Switch didn't show a Price to Compare for this ZIP and distributor, so the price unit is unknown. Pick it here.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "already_configured": "This gas market is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Energy Shopper settings",
+        "data": {
+          "usage_statistic": "Gas usage statistic",
+          "current_rate_entity": "Current supply rate sensor",
+          "current_rate_value": "Current supply rate",
+          "current_rate_unit": "Unit of the rate you typed",
+          "threshold_pct": "Recommend switching at savings of at least",
+          "no_cancellation_fee": "Skip offers with a cancellation fee",
+          "prior_suppliers": "Suppliers you've used before",
+          "rate_jump_pct": "Flag a rise in your rate of at least",
+          "therms_per_mcf": "Heat content (therms per Mcf)"
+        }
+      }
+    }
+  },
+  "selector": {
+    "price_unit": {
+      "options": { "mcf": "Mcf", "ccf": "ccf", "therm": "therm" }
+    },
+    "service_type": {
+      "options": { "residential": "Residential", "commercial": "Commercial" }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "gas_recommendation": {
+        "name": "Gas recommendation",
+        "state": { "switch": "Switch", "stay": "Stay", "unknown": "Unknown" }
+      },
+      "gas_best_offer": { "name": "Best gas offer" },
+      "gas_best_offer_price": { "name": "Best gas offer price" },
+      "gas_annual_savings": { "name": "Gas annual savings" },
+      "gas_savings_percent": { "name": "Gas savings" },
+      "gas_current_rate": { "name": "Current gas supply rate" },
+      "gas_price_to_compare": { "name": "Gas Price to Compare" },
+      "gas_annual_usage": { "name": "Projected annual gas use" },
+      "gas_offers": { "name": "Gas offers ranked" }
+    }
+  },
+  "issues": {
+    "cheaper_gas_supplier": {
+      "title": "Cheaper gas supplier: {supplier}",
+      "description": "{supplier} ({plan}, {term}) is ${price}/{unit} against your ${baseline}/{unit}, about ${savings} a year ({pct}%) less on your usage.\n\nTo switch, call {phone} or use the PA Gas Switch listing. Check the term, any cancellation fee and whether the price is introductory before signing.\n\nThis goes away on its own when the offer stops being worth it. Ignoring it silences this supplier only."
+    },
+    "gas_rate_jump": {
+      "title": "Your gas supply rate rose {pct}%",
+      "description": "Your supply rate went from ${old}/{unit} (on {old_date}) to ${new}/{unit}. Variable rates often reset like this; the Energy Shopper sensors show whether another offer is cheaper now."
+    }
+  }
+}
