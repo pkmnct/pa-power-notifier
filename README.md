@@ -125,6 +125,10 @@ make unit-test             # offline tests for the shared ranking library (energ
 
 Offline debugging: `DUQUESNE_BILL_PDF=/path/to/bill.pdf` parses a saved bill; `DUQUESNE_USE_FILE=true` reads the last saved Opower response (`DATA_DIR/duquesne_response.json`) instead of logging in; `PEOPLES_GAS_USE_FILE=true` reads a saved `LoadGasUsage` response (`PEOPLES_GAS_RESPONSE_FILE`). `PA_POWER_DEBUG=1` turns on debug logging.
 
+## Duquesne collector (Home Assistant)
+
+An optional service that fetches Duquesne usage and bills daily and serves them as a local JSON API, for the Home Assistant work in `docs/home-assistant-design.md`. It runs as a Home Assistant add-on or with `docker compose --profile collector up -d`. See [collector/README.md](collector/README.md).
+
 ## Troubleshooting
 
 - **No offers**: check `ELECTRIC_RATE_TYPE` (or use `ELECTRIC_SHOP_RESULTS_URL`) and `GAS_ID`.

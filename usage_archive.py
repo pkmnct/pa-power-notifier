@@ -319,7 +319,10 @@ class BillArchive:
             "bill_count": len(self._index),
             "last_updated": datetime.now().isoformat(timespec="seconds"),
         }
-        self.index_path.write_text(json.dumps(payload, indent=2))
+        # Temp file + rename: a reader (the collector API) never sees a half-written index
+        tmp = self.index_path.with_name(self.index_path.name + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2))
+        os.replace(tmp, self.index_path)
 
     def archive_pdf(
         self,
@@ -390,6 +393,10 @@ class BillArchive:
 
     def known_ids(self) -> List[str]:
         return sorted(self._index)
+
+    def entries(self) -> List[dict]:
+        """Copies of every index entry, oldest bill date first (undated bills first)."""
+        return [dict(self._index[k]) for k in sorted(self._index, key=lambda k: (self._index[k].get("bill_date") or "", k))]
 
     def fill_bill_meta(self, bill_id: str, bill_date: str, details: Optional[dict] = None) -> None:
         """Fill in a bill's date and details (from the bill history) where not recorded yet."""

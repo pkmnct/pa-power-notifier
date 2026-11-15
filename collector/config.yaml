@@ -1,0 +1,36 @@
+# Home Assistant add-on: Duquesne Light collector.
+# The image is the root Dockerfile's `collector` target (see collector/README.md).
+name: Duquesne Light collector
+version: "0.1.0"
+slug: duquesne_collector
+description: >-
+  Fetches Duquesne Light usage and bill PDFs (supplier, supply rate) with headless
+  Chromium daily and serves them as a local JSON API.
+url: https://github.com/pkmnct/pa-power-notifier/tree/main/collector
+arch:
+  - amd64
+  - aarch64
+# Multi-arch image built from the repository's root Dockerfile (--target collector).
+image: ghcr.io/pkmnct/pa-power-notifier-collector
+startup: application
+boot: auto
+# /data (archive: usage JSON, bill PDFs, status) persists across restarts and updates.
+ports:
+  8765/tcp: 8765
+ports_description:
+  8765/tcp: Collector JSON API (change the host port in the Network section)
+options:
+  username: ""
+  password: ""
+  run_at: "04:30"
+  download_bills: true
+  hourly_lookback_days: 400
+  log_level: info
+schema:
+  username: str
+  password: password
+  run_at: match(^([01][0-9]|2[0-3]):[0-5][0-9](,([01][0-9]|2[0-3]):[0-5][0-9])*$)
+  api_token: password?
+  download_bills: bool
+  hourly_lookback_days: int(29,800)
+  log_level: list(debug|info|warning|error)

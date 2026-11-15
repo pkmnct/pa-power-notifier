@@ -1,0 +1,26 @@
+configuration:
+  username:
+    name: Username
+    description: Your duquesnelight.com login (email or username).
+  password:
+    name: Password
+  run_at:
+    name: Schedule
+    description: >-
+      Local time(s) for the daily fetch, HH:MM, comma-separated for more than one
+      (e.g. "04:30" or "04:30,16:30").
+  api_token:
+    name: API token
+    description: >-
+      Optional. When set, API clients must send "Authorization: Bearer <token>".
+      /health stays open.
+  download_bills:
+    name: Download bills
+    description: Download new bill PDFs each run (needed for supplier and supply rate).
+  hourly_lookback_days:
+    name: Hourly history depth (days)
+    description: How far back to page Opower's hourly usage when filling the archive.
+  log_level:
+    name: Log level
+network:
+  8765/tcp: Collector JSON API

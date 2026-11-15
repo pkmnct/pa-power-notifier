@@ -53,3 +53,15 @@ unit-test:
 # over time — it is deliberately not cleaned.
 clean:
 	rm -rf __pycache__ energy_shopper_core/__pycache__ energy_shopper_core/markets/__pycache__ tests/__pycache__ browser/dist
+
+# ── Duquesne collector (collector/README.md) ──────────────────────────────────
+.PHONY: collector-build collector-up collector-serve
+
+collector-build:
+	docker build --target collector -t duquesne-collector .
+
+collector-up:
+	docker compose --profile collector up -d duquesne-collector
+
+collector-serve:
+	.venv/bin/python collector/collector.py
