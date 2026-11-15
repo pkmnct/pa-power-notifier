@@ -757,9 +757,9 @@ class DuquesneLightAnalyzer:
             )
             days = self._MAX_HOURLY_DAYS
         try:
-            from tou_analyzer import HourlyUsageRecord
+            from energy_shopper_core.tou import HourlyUsageRecord
         except ImportError:
-            logger.error("tou_analyzer module not available")
+            logger.error("energy_shopper_core not available")
             return []
 
         if self.use_file:
@@ -780,7 +780,7 @@ class DuquesneLightAnalyzer:
 
     def _fetch_hourly_window(self, start_date: datetime, end_date: datetime) -> List:
         try:
-            from tou_analyzer import HourlyUsageRecord
+            from energy_shopper_core.tou import HourlyUsageRecord
         except ImportError:
             return []
 
@@ -899,9 +899,9 @@ class DuquesneLightAnalyzer:
         lookback = max(self._MAX_HOURLY_DAYS, lookback)
 
         try:
-            from tou_analyzer import HourlyUsageRecord
+            from energy_shopper_core.tou import HourlyUsageRecord
         except ImportError:
-            logger.error("tou_analyzer module not available")
+            logger.error("energy_shopper_core not available")
             return []
 
         if self.use_file:

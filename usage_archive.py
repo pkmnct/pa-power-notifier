@@ -27,6 +27,8 @@ from typing import Any, Dict, Iterable, List, Optional
 logger = logging.getLogger(__name__)
 
 from env_bootstrap import data_dir
+from energy_shopper_core.tou import HourlyUsageRecord
+from energy_shopper_core.utilities.peoples_gas import GasUsageData
 
 
 def _default_data_path(name: str) -> str:
@@ -262,12 +264,7 @@ class GasUsageStore:
             logger.error("Could not save gas usage store: %s", e)
 
     def all_records_as_gas_usage_data(self) -> List[Any]:
-        """Return archived rows as peoples_gas_analyzer.GasUsageData when available."""
-        try:
-            from peoples_gas_analyzer import GasUsageData
-        except ImportError:
-            return list(self._records.values())
-
+        """Return archived rows as GasUsageData."""
         out: List[Any] = []
         for r in sorted(
             self._records.values(),
@@ -512,6 +509,94 @@ class MarketArchive:
             path.write_text("".join(json.dumps(r) + "\n" for r in rows))
         except Exception as e:
             logger.warning("Could not log %s Price to Compare: %s", utility, e)
+
+
+# ---------------------------------------------------------------------------
+# Hourly usage persistence
+# ---------------------------------------------------------------------------
+
+class HourlyUsageStore:
+    """
+    Persistent store for hourly usage records.
+
+    Records are keyed by their ISO datetime string. Merging new data never
+    overwrites existing records, so historical data accumulates over time
+    even as the API's rolling window advances.
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        self._records: Dict[str, dict] = {}
+        self._load()
+
+    def _load(self):
+        if not os.path.exists(self.path):
+            return
+        try:
+            with open(self.path) as f:
+                data = json.load(f)
+            self._records = {r['dt']: r for r in data.get('records', [])}
+            logger.info(
+                "Loaded %d hourly records from %s (range: %s to %s)",
+                len(self._records), self.path,
+                data.get('earliest', '?'), data.get('latest', '?'),
+            )
+        except Exception as e:
+            logger.warning("Could not load hourly usage store at %s: %s", self.path, e)
+
+    def merge(self, records: List[HourlyUsageRecord]) -> int:
+        """
+        Merge new records without deleting history.
+
+        Existing hours keep their first-seen kWh. If an existing hour had
+        cost=0 and the new fetch has cost>0, fill in the cost (utilities
+        often backfill $ after the kWh read).
+        Returns the count of genuinely new records added.
+        """
+        added = 0
+        filled = 0
+        for r in records:
+            if r.dt not in self._records:
+                self._records[r.dt] = asdict(r)
+                added += 1
+            else:
+                existing = self._records[r.dt]
+                if (existing.get("cost") or 0) <= 0 and (r.cost or 0) > 0:
+                    existing["cost"] = float(r.cost)
+                    filled += 1
+        if added or filled:
+            logger.info(
+                "Merged %d new hourly records, filled cost on %d (%d total)",
+                added,
+                filled,
+                len(self._records),
+            )
+        return added
+
+    def save(self):
+        if not self._records:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.path) or '.', exist_ok=True)
+            sorted_dts = sorted(self._records.keys())
+            data = {
+                'records': [self._records[dt] for dt in sorted_dts],
+                'record_count': len(self._records),
+                'earliest': sorted_dts[0],
+                'latest': sorted_dts[-1],
+                'last_updated': datetime.now().isoformat(),
+            }
+            with open(self.path, 'w') as f:
+                json.dump(data, f, indent=2)
+            logger.info("Saved %d hourly records to %s", len(self._records), self.path)
+        except Exception as e:
+            logger.error("Could not save hourly usage store: %s", e)
+
+    def all_records(self) -> List[HourlyUsageRecord]:
+        return [HourlyUsageRecord(**r) for r in self._records.values()]
+
+    def __len__(self) -> int:
+        return len(self._records)
 
 
 def save_report(text: str, html: str, directory: Optional[str] = None) -> Optional[str]:

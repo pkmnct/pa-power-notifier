@@ -12,7 +12,7 @@ import os
 import re
 import logging
 from datetime import date, datetime
-from typing import Optional, Tuple
+from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup
@@ -41,10 +41,6 @@ DUQUESNE_LIGHT_RATES_URL = "https://duquesnelight.com/service-reliability/servic
 
 # People's Gas PA - set PEOPLES_GAS_RATES_URL if your utility uses a different page
 PEOPLES_GAS_DEFAULT_URL = "https://www.peoplesgas.com/rates/residential/"
-
-# PA Gas Switch shop page: shows the utility's supply-only Price to Compare and the
-# billing unit (Mcf / ccf / therm) its supplier offers are quoted in.
-PA_GAS_SWITCH_SHOP_URL = "https://www.pagasswitch.com/shop-for-rates/"
 
 
 def _parse_cents_or_dollars(text: str) -> Optional[float]:
@@ -188,58 +184,6 @@ def scrape_peoples_gas_rate(
     return None
 
 
-_GAS_PTC_RE = re.compile(
-    r"Price to Compare for\s*(\d{5}).{0,250}?\$\s*(\d+\.\d+)\s*per\s*(Mcf|ccf|therm)\b",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
-def scrape_pagasswitch_price_to_compare(
-    distributor_id: str,
-    zipcode: str,
-    session: Optional[requests.Session] = None,
-) -> Optional[Tuple[float, str]]:
-    """
-    Scrape the utility's residential Price to Compare from the PA Gas Switch shop page.
-
-    Returns (usd_per_unit, unit) where unit is 'mcf', 'ccf' or 'therm' — the same unit
-    PA Gas Switch quotes that distributor's supplier offers in. None if unavailable.
-    """
-    if not distributor_id or not zipcode:
-        return None
-    sess = session or requests.Session()
-    sess.headers.setdefault("User-Agent", "Mozilla/5.0 (compatible; PA-Power-Notifier/1.0)")
-    try:
-        r = sess.get(
-            PA_GAS_SWITCH_SHOP_URL,
-            params={"zipcode": zipcode, "serviceType": "residential", "distributor": distributor_id},
-            timeout=30,
-        )
-        r.raise_for_status()
-    except Exception as e:
-        logger.warning("PA Gas Switch shop page request failed: %s", e)
-        return None
-
-    # The page silently falls back to another utility when the ZIP/distributor pair is
-    # invalid; its CSV export link names the distributor actually shown.
-    if f"RateCSV?id={distributor_id}&" not in r.text.replace("&amp;", "&"):
-        logger.warning(
-            "PA Gas Switch shop page did not show distributor %s for ZIP %s — check GAS_ZIPCODE",
-            distributor_id,
-            zipcode,
-        )
-        return None
-
-    body = BeautifulSoup(r.text, "html.parser").get_text(separator=" ", strip=True)
-    m = _GAS_PTC_RE.search(body)
-    if not m:
-        logger.warning("Could not parse Price to Compare from PA Gas Switch shop page")
-        return None
-    price, unit = float(m.group(2)), m.group(3).lower()
-    logger.info("Gas Price to Compare from PA Gas Switch: $%.5f per %s", price, unit)
-    return price, unit
-
-
 # ---------------------------------------------------------------------------
 # Duquesne Light TOU supply rate scraper
 # ---------------------------------------------------------------------------
@@ -320,7 +264,7 @@ def _parse_tou_rates_from_pdf_bytes(
         logger.warning("pdfplumber is not installed; cannot parse TOU rates from PDF")
         return None
 
-    from tou_analyzer import TOURates
+    from energy_shopper_core.tou import TOURates
 
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -388,7 +332,7 @@ def _load_tou_cache(cache_path: str) -> Optional[object]:
     if not os.path.exists(cache_path):
         return None
     try:
-        from tou_analyzer import TOURates
+        from energy_shopper_core.tou import TOURates
         with open(cache_path) as f:
             data = json.load(f)
         rates = TOURates(**data)

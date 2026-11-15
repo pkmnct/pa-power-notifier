@@ -4,10 +4,10 @@ Which suppliers you have used at this address, and which new-customer-only offer
 that rules out.
 
 History sources:
-  - Electric: suppliers on archived Duquesne bills (usage_archive.BillArchive)
-  - Both: PRIOR_ELECTRIC_SUPPLIERS / PRIOR_GAS_SUPPLIERS for anything older than the
-    bills you have, as "Supplier Name@YYYY-MM-DD; Other Supplier" (date = last month
-    on that supplier; leave it off if unknown)
+  - suppliers read from your bills (rows with "supplier" and "last_bill")
+  - a configured list for anything older than the bills you have, as
+    "Supplier Name@YYYY-MM-DD; Other Supplier" (date = last month on that supplier;
+    leave it off if unknown)
 
 An offer is new-customer-only when PA Power/Gas Switch marks "New Customers Offer"
 or its description says so. If it names a re-eligibility window ("two years from the
@@ -17,7 +17,6 @@ the supplier rules the offer out.
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -43,7 +42,7 @@ _SUFFIXES = {"llc", "inc", "co", "corp", "corporation", "company", "ltd", "lp"}
 class PriorSupplier:
     name: str
     last_used: Optional[date]  # None = date unknown
-    source: str  # "bill" | "env" | "current bill"
+    source: str  # "bill" | "configured" | "current bill"
 
 
 def normalize_supplier(name: str) -> str:
@@ -73,7 +72,7 @@ def reeligibility_window_days(text: str) -> Optional[int]:
     return n * 365 if m.group(2).lower().startswith("year") else n * 30
 
 
-def _parse_env(value: str) -> List[PriorSupplier]:
+def parse_prior_suppliers(value: str) -> List[PriorSupplier]:
     out = []
     for part in (value or "").split(";"):
         name, _, when = part.strip().partition("@")
@@ -83,17 +82,20 @@ def _parse_env(value: str) -> List[PriorSupplier]:
             last = date.fromisoformat(when.strip()) if when.strip() else None
         except ValueError:
             last = None
-        out.append(PriorSupplier(name.strip(), last, "env"))
+        out.append(PriorSupplier(name.strip(), last, "configured"))
     return out
 
 
 def prior_suppliers(
-    utility: str,
     bill_history: Iterable[dict] = (),
     current_supplier: str = "",
+    configured: str = "",
 ) -> List[PriorSupplier]:
-    """Every supplier used at this address for `utility` ('electric' | 'gas')."""
-    out = _parse_env(os.getenv(f"PRIOR_{utility.upper()}_SUPPLIERS", ""))
+    """
+    Every supplier used at this address: `configured` ("Name@YYYY-MM-DD; Other"),
+    then the suppliers on your bills, then the current one.
+    """
+    out = parse_prior_suppliers(configured)
     for row in bill_history:
         try:
             last = date.fromisoformat(row["last_bill"])

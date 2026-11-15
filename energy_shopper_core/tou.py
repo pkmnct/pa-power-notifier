@@ -2,9 +2,8 @@
 """
 Time-of-Use (TOU) Rate Analyzer for Duquesne Light residential customers.
 
-Persists hourly usage history locally (merging new data without losing old
-records) and evaluates whether switching to the TOU Supply Rate Pilot would
-save money based on actual usage patterns.
+Evaluates whether switching to the TOU Supply Rate Pilot would save money based on
+actual hourly usage. (The hourly history file lives in usage_archive.HourlyUsageStore.)
 
 TOU period definitions (Residential RS/RH/RA, from Duquesne Light Rider No. 8):
   Peak:           3:00 PM – 9:00 PM, Mon–Fri, excluding PJM holidays
@@ -16,11 +15,8 @@ PJM Holidays: New Year's Day, Memorial Day, Independence Day,
 """
 
 import calendar
-import json
 import logging
-import os
-import re
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -137,94 +133,6 @@ class TOUAnalysisResult:
     annual_savings_pct: float          # relative to supply-only cost, NOT total bill
     tou_recommended: bool
     date_range: Tuple[str, str]
-
-
-# ---------------------------------------------------------------------------
-# Hourly usage persistence
-# ---------------------------------------------------------------------------
-
-class HourlyUsageStore:
-    """
-    Persistent store for hourly usage records.
-
-    Records are keyed by their ISO datetime string. Merging new data never
-    overwrites existing records, so historical data accumulates over time
-    even as the API's rolling window advances.
-    """
-
-    def __init__(self, path: str):
-        self.path = path
-        self._records: Dict[str, dict] = {}
-        self._load()
-
-    def _load(self):
-        if not os.path.exists(self.path):
-            return
-        try:
-            with open(self.path) as f:
-                data = json.load(f)
-            self._records = {r['dt']: r for r in data.get('records', [])}
-            logger.info(
-                "Loaded %d hourly records from %s (range: %s to %s)",
-                len(self._records), self.path,
-                data.get('earliest', '?'), data.get('latest', '?'),
-            )
-        except Exception as e:
-            logger.warning("Could not load hourly usage store at %s: %s", self.path, e)
-
-    def merge(self, records: List[HourlyUsageRecord]) -> int:
-        """
-        Merge new records without deleting history.
-
-        Existing hours keep their first-seen kWh. If an existing hour had
-        cost=0 and the new fetch has cost>0, fill in the cost (utilities
-        often backfill $ after the kWh read).
-        Returns the count of genuinely new records added.
-        """
-        added = 0
-        filled = 0
-        for r in records:
-            if r.dt not in self._records:
-                self._records[r.dt] = asdict(r)
-                added += 1
-            else:
-                existing = self._records[r.dt]
-                if (existing.get("cost") or 0) <= 0 and (r.cost or 0) > 0:
-                    existing["cost"] = float(r.cost)
-                    filled += 1
-        if added or filled:
-            logger.info(
-                "Merged %d new hourly records, filled cost on %d (%d total)",
-                added,
-                filled,
-                len(self._records),
-            )
-        return added
-
-    def save(self):
-        if not self._records:
-            return
-        try:
-            os.makedirs(os.path.dirname(self.path) or '.', exist_ok=True)
-            sorted_dts = sorted(self._records.keys())
-            data = {
-                'records': [self._records[dt] for dt in sorted_dts],
-                'record_count': len(self._records),
-                'earliest': sorted_dts[0],
-                'latest': sorted_dts[-1],
-                'last_updated': datetime.now().isoformat(),
-            }
-            with open(self.path, 'w') as f:
-                json.dump(data, f, indent=2)
-            logger.info("Saved %d hourly records to %s", len(self._records), self.path)
-        except Exception as e:
-            logger.error("Could not save hourly usage store: %s", e)
-
-    def all_records(self) -> List[HourlyUsageRecord]:
-        return [HourlyUsageRecord(**r) for r in self._records.values()]
-
-    def __len__(self) -> int:
-        return len(self._records)
 
 
 # ---------------------------------------------------------------------------

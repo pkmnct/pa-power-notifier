@@ -32,6 +32,7 @@ COPY --from=browser-build /browser/node_modules browser/node_modules
 COPY --from=browser-build /browser/dist browser/dist
 
 COPY *.py ./
+COPY energy_shopper_core energy_shopper_core
 
 # Run as an unprivileged user. Chromium still runs with --no-sandbox: its own sandbox
 # needs kernel features Docker's default seccomp profile blocks, and the container is

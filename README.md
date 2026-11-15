@@ -120,6 +120,7 @@ Single paths can be overridden (`HOURLY_USAGE_FILE`, `BILL_ARCHIVE_DIR`, `GAS_BI
 ```bash
 make electric-plan-check   # longer electric ranking against your usage
 make gas-plan-check        # gas usage forecast + ranking
+make unit-test             # offline tests for the shared ranking library (energy_shopper_core/)
 ```
 
 Offline debugging: `DUQUESNE_BILL_PDF=/path/to/bill.pdf` parses a saved bill; `DUQUESNE_USE_FILE=true` reads the last saved Opower response (`DATA_DIR/duquesne_response.json`) instead of logging in; `PEOPLES_GAS_USE_FILE=true` reads a saved `LoadGasUsage` response (`PEOPLES_GAS_RESPONSE_FILE`). `PA_POWER_DEBUG=1` turns on debug logging.
