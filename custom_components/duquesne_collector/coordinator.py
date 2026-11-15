@@ -281,9 +281,11 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
             # hours, and leave cost to the daily full fetch so it can backfill from the start.
             fetch_from = last_start + timedelta(hours=1)
             import_cost = False
-        if fetch_from is None:
-            self._last_full_fetch = now
         body = await self.client.usage(fetch_from)
+        if fetch_from is None:
+            # Only once it succeeded: a timed-out full fetch must not hold off the cost
+            # backfill for another day.
+            self._last_full_fetch = now
 
         # Any full fetch includes the daily-only older days: consumption already has them
         # (it only takes rows after its last one), but a late cost backfill needs them.

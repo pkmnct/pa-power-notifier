@@ -111,3 +111,20 @@ async def test_options_flow(recorder_mock, hass: HomeAssistant, portal, config_e
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert config_entry.options == {CONF_SAVE_BILL_PDFS: True}
+
+
+async def test_reauth_when_account_lookup_falls_back(
+    recorder_mock, hass: HomeAssistant, mock_setup_entry, portal, config_entry
+) -> None:
+    """The portal hides the account number on this login: that's not a different account."""
+    config_entry.add_to_hass(hass)
+    portal.password = "new-secret"
+    portal.account = ""  # lookup falls back to the username
+    result = await config_entry.start_reauth_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_USERNAME: USERNAME, CONF_PASSWORD: "new-secret"}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert config_entry.data[CONF_PASSWORD] == "new-secret"
+    assert config_entry.unique_id == ACCOUNT  # unchanged

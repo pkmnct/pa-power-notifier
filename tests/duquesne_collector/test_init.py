@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from custom_components.duquesne_collector.api import CollectorError
 from custom_components.duquesne_collector.const import CONF_STATISTIC_KEY, COST_GRACE, DOMAIN
 from custom_components.duquesne_collector.coordinator import (
     Point,
@@ -245,3 +246,27 @@ def test_usage_points_ignores_bad_hours_and_daily_overlap() -> None:
     pts = usage_points(body, backfill=True)
     assert [p.kwh for p in pts] == [20, 1]
     assert [p.kwh for p in usage_points(body, backfill=False)] == [1]
+
+
+async def test_failed_full_fetch_is_retried_next_poll(
+    hass: HomeAssistant, collector: FakeCollector, config_entry
+) -> None:
+    for h in collector.hourly:
+        h["cost"] = None
+    collector.daily = [dict(d, cost=None) for d in collector.daily]
+    await _setup(hass, config_entry)
+    coordinator = config_entry.runtime_data
+    coordinator._last_full_fetch = dt_util.utcnow() - timedelta(hours=25)  # noqa: SLF001
+    original = coordinator.client.usage
+
+    async def failing_full(start):
+        if start is None:
+            raise CollectorError("timed out")
+        return await original(start)
+
+    coordinator.client.usage = failing_full
+    await _poll(hass, config_entry)
+    coordinator.client.usage = original
+    starts_before = list(collector.usage_starts)
+    await _poll(hass, config_entry)
+    assert collector.usage_starts[len(starts_before):] == ["2000-01-01"]  # tried again, not skipped for a day

@@ -214,3 +214,40 @@ async def test_options_flow_electric(hass: HomeAssistant, power_switch: FakePowe
     assert result["type"] is FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done()
     assert state(hass, "electric_recommendation").state == "stay"
+
+
+async def test_unavailable_supplier_sensor_is_not_default_service(
+    hass: HomeAssistant, power_switch: FakePowerSwitch, electric_entry
+) -> None:
+    await add_hourly_usage(hass)
+    set_bill_sensors(hass)
+    events = async_capture_events(hass, EVENT_RECOMMENDATION_CHANGED)
+    await _setup(hass, electric_entry)
+    assert state(hass, "electric_recommendation").state == "switch"
+    hass.states.async_set("sensor.dl_supplier", "unavailable")  # the collector entry is down
+    await electric_entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    rec = state(hass, "electric_recommendation")
+    assert rec.state == "unknown"
+    assert any("sensor.dl_supplier" in n and "no recommendation" in n for n in rec.attributes["notes"])
+    assert len(issues(hass)) == 1  # the cheaper-supplier issue is kept
+    set_bill_sensors(hass)
+    await electric_entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert state(hass, "electric_recommendation").state == "switch"
+    assert len(events) == 1
+
+
+async def test_empty_listing_raises_no_tou_issue(
+    hass: HomeAssistant, power_switch: FakePowerSwitch, electric_entry
+) -> None:
+    await add_hourly_usage(hass)
+    set_bill_sensors(hass)
+    power_switch.offers = []
+    entry = MockConfigEntry(
+        domain=DOMAIN, title=electric_entry.title, unique_id=electric_entry.unique_id,
+        data=electric_entry.data, options={**electric_entry.options, **TOU},
+    )
+    await _setup(hass, entry)
+    assert state(hass, "electric_recommendation").state == "unknown"
+    assert issues(hass) == []

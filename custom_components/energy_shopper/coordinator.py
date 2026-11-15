@@ -121,6 +121,7 @@ class ShopperData:
     usage_count: int  # gas: monthly cycles; electric: hours
     notes: list[tuple[str, str]] = field(default_factory=list)
     current_supplier: str | None = None  # electric
+    missing_inputs: list[str] = field(default_factory=list)  # configured sensors with no value
     tou: TOUAnalysisResult | None = None  # electric, when Time-of-Use was scored
     tou_rates: TOURates | None = None
     updated: datetime = field(default_factory=dt_util.utcnow)
@@ -129,9 +130,16 @@ class ShopperData:
     def compared(self) -> bool:
         """
         False when no switch/stay call was made: no usage or no baseline (no stay row),
-        or the market listed no offers at all, which is a site problem rather than news.
+        the market listed no offers at all (a site problem rather than news), or a sensor
+        you configured as an input has no value, so the comparison would quietly use a
+        fallback and flip back when the sensor returns.
         """
-        return self.offers_listed > 0 and self.decision.recommended is not None and self.decision.stay is not None
+        return (
+            self.offers_listed > 0
+            and not self.missing_inputs
+            and self.decision.recommended is not None
+            and self.decision.stay is not None
+        )
 
     @property
     def recommendation(self) -> str:
@@ -207,9 +215,16 @@ def monthly_usage_cycles(
     this_month = (now.year, now.month)
     past = sorted(len(d) for key, d in days.items() if key < this_month)
     cycle_source = bool(past) and past[len(past) // 2] <= 2  # median month has 1–2 readings
+    # A daily/hourly source whose history begins mid-month has a partial first month too.
+    first = min(by_month) if by_month else None
+    first_partial = (
+        first is not None and not cycle_source and min(d.day for d in days[first]) > 1
+    )
     cycles = []
     for (year, month), change in sorted(by_month.items()):
         if (year, month) > this_month or ((year, month) == this_month and not cycle_source):
+            continue
+        if (year, month) == first and first_partial:
             continue
         if kind == "volume":
             mcf = change / 1000.0  # ft³ → Mcf
@@ -293,6 +308,7 @@ class EnergyShopperCoordinator(DataUpdateCoordinator[ShopperData]):
         self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}")
         self._state: dict[str, Any] = {}
         self._unit: str | None = None
+        self._missing: list[str] = []  # this refresh's configured-but-unavailable inputs
 
     # -- persisted state: last recommendation, baseline price history -----------------
 
@@ -308,11 +324,13 @@ class EnergyShopperCoordinator(DataUpdateCoordinator[ShopperData]):
         return self.config_entry.options.get(key, default)
 
     def _entity_value(self, entity_id: str | None) -> tuple[str | None, str | None]:
-        """(state, unit) of an entity, or (None, None) when it has no value."""
+        """(state, unit) of an input entity, or (None, None) when it has no value. A
+        configured entity without a value is recorded, so this refresh isn't compared."""
         if not entity_id:
             return None, None
         state = self.hass.states.get(entity_id)
         if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            self._missing.append(entity_id)
             return None, None
         return state.state, state.attributes.get("unit_of_measurement")
 
@@ -340,7 +358,10 @@ class EnergyShopperCoordinator(DataUpdateCoordinator[ShopperData]):
             notes.append(("error", f"Usage statistic {statistic_id} is in {unit!r}, not {what} unit."))
             return [], None
         units = {"volume": UnitOfVolume.CUBIC_FEET} if kind == "volume" else {"energy": UnitOfEnergy.KILO_WATT_HOUR}
-        start = dt_util.as_utc(dt_util.now() - timedelta(days=days))
+        # From local midnight on the 1st, so the oldest month is whole.
+        start = dt_util.as_utc(
+            (dt_util.now() - timedelta(days=days)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        )
         stats = await recorder.async_add_executor_job(
             statistics_during_period, self.hass, start, None, {statistic_id}, period, units, {"change"}
         )
@@ -354,7 +375,7 @@ class EnergyShopperCoordinator(DataUpdateCoordinator[ShopperData]):
         if entity_id:
             value, value_unit = self._entity_value(entity_id)
             if value is None:
-                notes.append(("warning", f"{entity_id} has no value; using the Price to Compare."))
+                notes.append(("warning", f"{entity_id} has no value; no recommendation until it's back."))
             else:
                 try:
                     price = decision.convert_gas_price(float(value), value_unit or unit, unit, therms_per_mcf)
@@ -387,7 +408,8 @@ class EnergyShopperCoordinator(DataUpdateCoordinator[ShopperData]):
         return None, None
 
     def _electric_supplier(self) -> str | None:
-        """Your supplier's name, or None on the utility's default service."""
+        """Your supplier's name, or None on the utility's default service. An unavailable
+        supplier sensor is not "default service": it's recorded as a missing input."""
         name, _ = self._entity_value(self._opt(CONF_SUPPLIER_ENTITY))
         name = (name or self._opt(CONF_SUPPLIER_NAME) or "").strip()
         if not name or any(h in name.lower() for h in DEFAULT_SERVICE_HINTS):
@@ -412,9 +434,20 @@ class EnergyShopperCoordinator(DataUpdateCoordinator[ShopperData]):
     # -- update ------------------------------------------------------------------------
 
     async def _async_update_data(self) -> ShopperData:
+        self._missing = []
         shopper = await (self._update_electric() if self.fuel == FUEL_ELECTRIC else self._update_gas())
-        self._sync_cheaper_issue(shopper)
-        self._track_rate(shopper)
+        shopper.missing_inputs = list(dict.fromkeys(self._missing))
+        if shopper.missing_inputs and self.fuel == FUEL_ELECTRIC:
+            shopper.notes.insert(
+                0,
+                ("warning", f"No value from {', '.join(shopper.missing_inputs)}; no recommendation until it's back."),
+            )
+        if shopper.compared:
+            # Repair issues and rate history follow real comparisons only: a refresh that
+            # compared nothing must not delete (and so un-dismiss) a cheaper-supplier issue,
+            # or raise one the recommendation sensor doesn't show.
+            self._sync_cheaper_issue(shopper)
+            self._track_rate(shopper)
         self._fire_if_changed(shopper)
         self._state["unit"] = shopper.unit
         await self._store.async_save(self._state)

@@ -31,19 +31,24 @@ USER_SCHEMA = vol.Schema(
 )
 
 
+def _fallback_account(username: str) -> str:
+    return username.strip().lower()
+
+
 def _login(username: str, password: str) -> str:
     """Log in and return the account number (blocking)."""
     client = pg.PeoplesGasClient(username, password)
     client.login()
     # The account number lives in a hidden input on the bill dashboard; fall back to the
     # username so a portal change can't block setup.
-    return client._account_number() or username.strip().lower()  # noqa: SLF001
+    return client._account_number() or _fallback_account(username)  # noqa: SLF001
 
 
 async def validate_login(
     hass: HomeAssistant, username: str, password: str
 ) -> tuple[str | None, dict[str, str]]:
-    """Return (account number, errors) for a login attempt."""
+    """Return (account number, errors) for a login attempt. The account is the
+    lowercased username when the portal didn't show the number."""
     try:
         account = await hass.async_add_executor_job(_login, username, password)
     except pg.PeoplesGasAuthError:
@@ -99,8 +104,13 @@ class PeoplesGasConfigFlow(ConfigFlow, domain=DOMAIN):
                 self.hass, data[CONF_USERNAME], data[CONF_PASSWORD]
             )
             if not errors:
-                await self.async_set_unique_id(account)
-                self._abort_if_unique_id_mismatch(reason="wrong_account")
+                # Only a real account number can prove it's a different account: when
+                # the portal hid it this time (the lookup fell back to the username), or
+                # hid it at setup, don't block re-entering the password.
+                fallback = _fallback_account(data[CONF_USERNAME])
+                if account != fallback and entry.unique_id != _fallback_account(entry.data[CONF_USERNAME]):
+                    await self.async_set_unique_id(account)
+                    self._abort_if_unique_id_mismatch(reason="wrong_account")
                 return self.async_update_reload_and_abort(entry, data=data)
         return self.async_show_form(
             step_id="reauth_confirm",

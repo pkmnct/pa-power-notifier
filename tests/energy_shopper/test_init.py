@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from custom_components.energy_shopper.const import (
@@ -20,8 +22,6 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
-from datetime import timedelta
-
 from homeassistant.util import dt as dt_util
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_capture_events
@@ -192,6 +192,7 @@ async def test_unavailable_rate_sensor_falls_back(hass: HomeAssistant, market: F
     await _setup(hass, config_entry)
     await _set_options(hass, config_entry, **{CONF_RATE_ENTITY: "sensor.peoples_ptc"})
     rec = state(hass, "gas_recommendation")
+    assert rec.state == "unknown"  # a configured input is missing: hold, don't compare against a fallback
     assert rec.attributes["baseline_source"] == "Price to Compare"
     assert any("sensor.peoples_ptc has no value" in n for n in rec.attributes["notes"])
 
@@ -291,3 +292,53 @@ async def test_unknown_refresh_does_not_repeat_switch_event(
     await _poll(hass, config_entry)
     assert state(hass, "gas_recommendation").state == "switch"
     assert [e.data["supplier"] for e in events] == ["Welcome Gas"]  # no repeat
+
+
+async def test_empty_listing_keeps_dismissed_issue(hass: HomeAssistant, market: FakeMarket, config_entry) -> None:
+    await add_usage(hass)
+    await _setup(hass, config_entry)
+    (issue_id,) = issues(hass, "cheaper_gas_supplier")
+    ir.async_ignore_issue(hass, DOMAIN, issue_id, True)
+    offers = market.offers
+    market.offers = []
+    await _poll(hass, config_entry)
+    assert issues(hass, "cheaper_gas_supplier") == [issue_id]  # not deleted by a glitch
+    market.offers = offers
+    await _poll(hass, config_entry)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, issue_id).dismissed_version is not None
+
+
+async def test_unavailable_rate_sensor_holds_recommendation(
+    hass: HomeAssistant, market: FakeMarket, config_entry
+) -> None:
+    await add_usage(hass)
+    hass.states.async_set("sensor.peoples_ptc", "0.300", {ATTR_UNIT_OF_MEASUREMENT: "USD/CCF"})
+    events = async_capture_events(hass, EVENT_RECOMMENDATION_CHANGED)
+    entry = MockConfigEntry(
+        domain=DOMAIN, title=config_entry.title, unique_id=config_entry.unique_id,
+        data=config_entry.data, options={**config_entry.options, CONF_RATE_ENTITY: "sensor.peoples_ptc"},
+    )
+    await _setup(hass, entry)
+    assert state(hass, "gas_recommendation").state == "switch"
+    hass.states.async_set("sensor.peoples_ptc", "unavailable")
+    await _poll(hass, entry)
+    assert state(hass, "gas_recommendation").state == "unknown"
+    assert issues(hass, "cheaper_gas_supplier")  # kept
+    hass.states.async_set("sensor.peoples_ptc", "0.300", {ATTR_UNIT_OF_MEASUREMENT: "USD/CCF"})
+    await _poll(hass, entry)
+    assert state(hass, "gas_recommendation").state == "switch"
+    assert len(events) == 1  # no flip-flop events
+
+
+def test_monthly_cycles_daily_source_drops_partial_first_month() -> None:
+    now = dt_util.now()
+    first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    months = [first]
+    for _ in range(3):
+        months.insert(0, (months[0] - timedelta(days=1)).replace(day=1))
+    rows = []
+    for i, m in enumerate(months[:-1]):
+        start_day = 15 if i == 0 else 0  # history begins mid-month
+        rows += [(m + timedelta(days=d), 100.0) for d in range(start_day, 28)]
+    cycles = monthly_usage_cycles(_day_rows(rows), "volume", 10.37, now)
+    assert [(c.year, c.month) for c in cycles] == [(m.year, m.month) for m in months[1:-1]]
