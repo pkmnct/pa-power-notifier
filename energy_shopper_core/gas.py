@@ -23,6 +23,18 @@ DEFAULT_THERMS_PER_MCF = 10.37
 GAS_PRICE_UNITS = ("mcf", "ccf", "therm")
 
 
+CCF_PER_MCF = 10.0  # 1 Mcf = 1,000 ft³ = 10 ccf (100 ft³)
+
+
+def mcf_to_ccf(mcf: float) -> float:
+    """Volume in ccf (Home Assistant's CCF) from Mcf, the unit utility portals report."""
+    return mcf * CCF_PER_MCF
+
+
+def usd_per_mcf_to_usd_per_ccf(usd_per_mcf: float) -> float:
+    return usd_per_mcf / CCF_PER_MCF
+
+
 def mcf_to_therms(mcf: float, therms_per_mcf: float = DEFAULT_THERMS_PER_MCF) -> float:
     return mcf * therms_per_mcf
 

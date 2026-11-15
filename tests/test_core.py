@@ -117,6 +117,8 @@ class GasAndTouTests(unittest.TestCase):
         self.assertEqual(gas.therms_per_gas_unit("ccf", 10.0), 1.0)
         self.assertEqual(gas.therms_per_gas_unit("therm", 10.0), 1.0)
         self.assertEqual(gas.mcf_to_therms(2, 10.0), 20.0)
+        self.assertEqual(gas.mcf_to_ccf(1.8), 18.0)
+        self.assertAlmostEqual(gas.usd_per_mcf_to_usd_per_ccf(3.57), 0.357)
         with self.assertRaises(ValueError):
             gas.therms_per_gas_unit("gallon")
 

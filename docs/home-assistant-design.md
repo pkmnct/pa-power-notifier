@@ -1,6 +1,6 @@
 # Home Assistant integration: design draft
 
-Status: draft for discussion, 2026-11-14. Step 1 of the build order is partly done (see "Step 1 progress"); nothing else is built yet.
+Status: draft for discussion, 2026-11-14. Step 1 of the build order is partly done (see "Step 1 progress"); step 2 is built and tested offline (see "Step 2 progress"), not yet run in a live Home Assistant.
 
 ## Goal
 
@@ -166,12 +166,43 @@ Still to do in step 1:
 - **Layout.** The package sits at the repo root as `energy_shopper_core/` rather than
   under `core/`, and the standalone scripts have not moved to `cli/`.
 
+## Step 2 progress
+
+`custom_components/peoples_gas/` is built, 2026-11-15, and passes offline Home Assistant
+tests (`tests/peoples_gas/`, pytest-homeassistant-custom-component against HA 2026.2.3,
+fake portal, no credentials). Not yet run against a live HA instance or the real portal.
+
+| Piece | What it does |
+|---|---|
+| Config flow | Username and password, validated by a portal login. `invalid_auth` on `PeoplesGasAuthError`, `cannot_connect` on network/portal errors. Unique ID is the account number (hidden input on the bill dashboard). Reauth flow, which refuses a login for a different account |
+| Coordinator | Polls every 12 hours with a fresh login, running the `requests` client in the executor. `ConfigEntryAuthFailed` on an auth error (starts reauth), `UpdateFailed` otherwise. Downloads the newest bill PDF only when the newest invoice changes |
+| Statistics | External statistics `peoples_gas:<account>_gas_consumption` (CCF, converted from Mcf) and `peoples_gas:<account>_gas_cost` (bill amount), following core Opower: `get_last_statistics`, then backfill everything on first run (both portal pages, ~24 cycles) and only newer cycles after that, continuing the sums. One row per cycle at local midnight (America/New_York) of the read date, which the portal sets to the 1st of the billing month. Cost has its own "last row", so a bill that arrives after its usage is still imported |
+| Sensors | Price to Compare and commodity rate (USD/CCF, with `per_mcf` attributes, parsed from the newest bill PDF), last bill amount (monetary), last bill date (date), current balance (monetary, `due_date` attribute). One service device per account |
+| Bill PDFs | Option, off by default: saves every bill as `<config>/peoples_gas/<account>/<date>_<invoice>.pdf`, downloading each once |
+
+**How the integration gets the core library:** a vendored, byte-for-byte copy of the
+four files it needs (`energy_shopper_core/__init__.py`, `gas.py`, `utilities/__init__.py`,
+`utilities/peoples_gas.py`) under `custom_components/peoples_gas/vendor/`. HA installs
+requirements from PyPI and the core isn't published yet; a symlink doesn't survive being
+copied into `config/custom_components/` or packaged for HACS. `scripts/vendor_core.py`
+refreshes the copy, and `tests/test_vendored_core.py` (part of `make unit-test`) fails if
+it drifts. Once the core is on PyPI: delete `vendor/`, add it to the manifest's
+`requirements`, and change the imports.
+
+Core change: `energy_shopper_core.gas` gained `CCF_PER_MCF`, `mcf_to_ccf` and
+`usd_per_mcf_to_usd_per_ccf` (the "gas units" open question below, for volume).
+
+Still to check live: the statistics in the Energy dashboard; whether
+`_account_number()` (a private client method the integration calls) finds the hidden
+input on every account; the portal's behaviour with two polls a day; hassfest/HACS
+validation (not run).
+
 ## Open questions
 
 - **Names.** `energy_shopper` is a placeholder. `duquesne_light` collides with the core stub domain of the same name that points at Opower; ours needs a different domain (e.g. `duquesne_light_bills`).
 - **Duquesne usage: ours or Opower's?** If core Opower works for some users, should our integration skip usage and only add supplier and bills? Simplest is to always provide both from the collector.
 - **Statistic IDs.** External statistics (`peoples_gas:...`) versus entity-backed ones. External is what Opower does and avoids fake "sensor" state; needs a check that the decision layer's source picker handles them.
-- **Gas units.** The portal reports Mcf, HA's Energy dashboard wants CCF or m³, offers are priced per Mcf/ccf/therm depending on the utility. Conversion belongs in the core library, once.
+- **Gas units.** The portal reports Mcf, HA's Energy dashboard wants CCF or m³, offers are priced per Mcf/ccf/therm depending on the utility. Conversion belongs in the core library, once. (Mcf → CCF is now in `core.gas`; therms were already there.)
 - **Collector reliability.** The browser path has been stable for us, but the site can change. The integration should surface "collector hasn't succeeded in N days" as a repair issue.
 - **Terms of use.** Both utility integrations log in to the user's own account at a low rate (daily). The README disclaimer carries over; worth a second read of both sites' terms before publishing to a marketplace.
 - **Other states.** Only a light check so far: Texas, Ohio and New York have official comparison sites; Illinois, New Jersey and Maryland are unconfirmed.
