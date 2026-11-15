@@ -36,6 +36,7 @@ from homeassistant.core import (
 )
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util, slugify
@@ -364,10 +365,28 @@ class EnergyShopperCoordinator(DataUpdateCoordinator[ShopperData]):
         entities = self._input_entities()
         if not entities:
             return lambda: None
-        return async_track_state_change_event(self.hass, entities, self._async_input_changed)
+        unsubs = [
+            async_track_state_change_event(self.hass, entities, self._async_input_changed),
+            # Startup skipped the missing-sensor repair; judge it once everything has loaded.
+            async_at_started(self.hass, self._async_started),
+        ]
+        # A held sensor may have got its value while the platforms were being set up,
+        # before this listener existed: its state change is gone, so look now.
+        self._async_refresh_if_inputs_back()
+
+        @callback
+        def unsubscribe() -> None:
+            for unsub in unsubs:
+                unsub()
+
+        return unsubscribe
 
     @callback
     def _async_input_changed(self, event: Event[EventStateChangedData]) -> None:
+        self._async_refresh_if_inputs_back()
+
+    @callback
+    def _async_refresh_if_inputs_back(self) -> None:
         data = self.data
         if data is None or not data.missing_inputs:
             return
@@ -375,6 +394,11 @@ class EnergyShopperCoordinator(DataUpdateCoordinator[ShopperData]):
             self.config_entry.async_create_background_task(
                 self.hass, self.async_request_refresh(), f"{DOMAIN} input back"
             )
+
+    @callback
+    def _async_started(self, hass: HomeAssistant) -> None:
+        if self.data is not None:
+            self._sync_input_gone_issue(self.data.missing_inputs)
 
     def _sync_input_gone_issue(self, missing: list[str]) -> None:
         """

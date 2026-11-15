@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from unittest.mock import patch
+
 import pytest
 
 from custom_components.energy_shopper.const import (
@@ -19,7 +21,7 @@ from custom_components.energy_shopper.const import (
 )
 from custom_components.energy_shopper.coordinator import monthly_usage_cycles
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT
+from homeassistant.const import ATTR_UNIT_OF_MEASUREMENT, EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.util import dt as dt_util
@@ -393,8 +395,10 @@ async def test_deleted_input_sensor_raises_issue(hass: HomeAssistant, market: Fa
     await _setup(hass, entry)
     assert issues(hass, "input_sensor_missing") == []
 
+    # Once startup finishes the sensor is judged gone, without waiting for the next poll.
     hass.set_state(CoreState.running)
-    await _poll(hass, entry)
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+    await hass.async_block_till_done()
     assert issues(hass, "input_sensor_missing") == [issue_id]
     issue = ir.async_get(hass).async_get_issue(DOMAIN, issue_id)
     assert issue.translation_placeholders["entities"] == "sensor.renamed_away"
@@ -414,3 +418,21 @@ async def test_deleted_input_sensor_raises_issue(hass: HomeAssistant, market: Fa
     )
     await hass.async_block_till_done()
     assert issues(hass, "input_sensor_missing") == []
+
+
+async def test_input_value_during_platform_setup_is_not_missed(
+    hass: HomeAssistant, market: FakeMarket, config_entry
+) -> None:
+    """The sensor gets its value after the first refresh but before the watcher subscribes."""
+    await add_usage(hass)
+    entry = _with_rate_entity(config_entry, "sensor.peoples_ptc")
+    forward = hass.config_entries.async_forward_entry_setups
+
+    async def forward_while_sensor_loads(*args, **kwargs):
+        hass.states.async_set("sensor.peoples_ptc", "0.300", {ATTR_UNIT_OF_MEASUREMENT: "USD/CCF"})
+        return await forward(*args, **kwargs)
+
+    with patch.object(hass.config_entries, "async_forward_entry_setups", forward_while_sensor_loads):
+        await _setup(hass, entry)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert state(hass, "gas_recommendation").state == "switch"
