@@ -30,21 +30,12 @@ from typing import TYPE_CHECKING, List, Optional
 if TYPE_CHECKING:
     import requests
 
+from energy_shopper_core.utilities.duquesne import html_looks_like_bot_challenge  # noqa: F401 (re-exported)
+
 logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parent
 _BROWSER_DIR = _REPO_ROOT / "browser"
-
-
-def html_looks_like_bot_challenge(html: str) -> bool:
-    """Heuristic for CDN bot walls (Imperva Incapsula returns tiny placeholder HTML)."""
-    if not html:
-        return True
-    if "_Incapsula_Resource" in html or "Incapsula incident ID" in html:
-        return True
-    if len(html) < 800 and ("Incapsula" in html or "incident id" in html.lower()):
-        return True
-    return False
 
 
 def _session_cookies_for_puppeteer(session: "requests.Session", page_url: str) -> List[dict]:
