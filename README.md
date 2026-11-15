@@ -13,6 +13,14 @@ Checks Pennsylvania electric and gas supplier offers from [PA Power Switch](http
 
 Without an account integration the checker still ranks offers, using `CURRENT_ELECTRIC_PRICE` / `CURRENT_GAS_PRICE` as your current rate.
 
+## Home Assistant
+
+The same ranking runs inside Home Assistant: usage in the Energy dashboard, switch/stay
+sensors, repair issues and a phone notification blueprint, for gas and electric
+(including Duquesne Light Time-of-Use). See **[docs/home-assistant.md](docs/home-assistant.md)**
+for the add-on and the three integrations. The standalone Docker + email version below
+keeps working without it.
+
 ## What you get
 
 Each run prints a report (and keeps a copy) and emails it when there's something to act on:
@@ -127,7 +135,7 @@ Offline debugging: `DUQUESNE_BILL_PDF=/path/to/bill.pdf` parses a saved bill; `D
 
 ## Duquesne collector (Home Assistant)
 
-An optional service that fetches Duquesne usage and bills daily and serves them as a local JSON API, for the Home Assistant work in `docs/home-assistant-design.md`. It runs as a Home Assistant add-on or with `docker compose --profile collector up -d`. See [collector/README.md](collector/README.md).
+An optional service that fetches Duquesne usage and bills daily and serves them as a local JSON API for the Home Assistant integrations ([docs/home-assistant.md](docs/home-assistant.md)). It runs as a Home Assistant add-on or with `docker compose --profile collector up -d duquesne-collector`. See [collector/README.md](collector/README.md).
 
 ## Troubleshooting
 

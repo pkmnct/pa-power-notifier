@@ -12,8 +12,6 @@ arch:
   - aarch64
 # Multi-arch image built from the repository's root Dockerfile (--target collector).
 image: ghcr.io/pkmnct/pa-power-notifier-collector
-startup: application
-boot: auto
 # /data (archive: usage JSON, bill PDFs, status) persists across restarts and updates.
 ports:
   8765/tcp: 8765

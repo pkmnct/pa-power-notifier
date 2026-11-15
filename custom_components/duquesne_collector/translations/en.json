@@ -9,7 +9,7 @@
           "api_token": "API token"
         },
         "data_description": {
-          "url": "The add-on listens on port 8765: http://localhost:8765 on Home Assistant OS, or http://<host>:8765 for a Docker Compose collector elsewhere.",
+          "url": "The add-on listens on port 8765: http://localhost:8765 on Home Assistant OS, or http://HOST:8765 (the collector machine's address) for a Docker Compose collector elsewhere.",
           "api_token": "Only if you set api_token on the add-on (COLLECTOR_API_TOKEN for Compose)."
         }
       },

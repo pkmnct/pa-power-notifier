@@ -1,0 +1,59 @@
+name: Collector image
+
+# Builds the Duquesne collector add-on image (root Dockerfile, target `collector`).
+# Pull requests: build for amd64 only, nothing pushed.
+# A tag `collector-vX.Y.Z` (matching `version` in collector/config.yaml): build amd64 +
+# arm64 and push ghcr.io/<owner>/pa-power-notifier-collector:X.Y.Z and :latest, which the
+# add-on's `image` points at.
+
+on:
+  pull_request:
+    paths: [Dockerfile, collector/**, browser/**, energy_shopper_core/**, "*.py", requirements.txt]
+  push:
+    tags: ["collector-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version from collector/config.yaml
+        id: version
+        run: |
+          version=$(sed -n 's/^version: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' collector/config.yaml)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "collector-v$version" ]; then
+            echo "Tag ${GITHUB_REF_NAME} doesn't match config.yaml version $version" >&2
+            exit 1
+          fi
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - if: github.ref_type == 'tag'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: collector
+          platforms: ${{ github.ref_type == 'tag' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          push: ${{ github.ref_type == 'tag' }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/pa-power-notifier-collector:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/pa-power-notifier-collector:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            io.hass.version=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,6 +1,6 @@
 # Home Assistant integration: design draft
 
-Status: draft for discussion, 2026-11-14. Step 1 of the build order is partly done (see "Step 1 progress"); steps 2, 3 and 5 are built and tested offline (see "Step 2 progress", "Step 3 progress" and "Step 5 progress"), not yet run in a live Home Assistant. Step 4's Duquesne collector and its `duquesne_collector` integration are built (see "Step 4 progress").
+Status: draft for discussion, 2026-11-14. Step 1 of the build order is partly done (see "Step 1 progress"); steps 2, 3 and 5 are built and tested offline (see "Step 2 progress", "Step 3 progress" and "Step 5 progress"), not yet run in a live Home Assistant. Step 6 packaging is prepared but nothing is published (see "Step 6 progress"). Step 4's Duquesne collector and its `duquesne_collector` integration are built (see "Step 4 progress").
 
 ## Goal
 
@@ -284,6 +284,22 @@ Time-of-Use rates are typed in: the tariff PDF scraper still doesn't work (see t
 README), and they change each Jun 1 and Dec 1. Electric supplier history beyond the
 current supplier comes only from "Suppliers you've used before"; the collector has the
 full bill history and could expose it.
+
+## Step 6 progress
+
+Prepared 2026-11-15; nothing is published yet. User guide: [home-assistant.md](home-assistant.md).
+
+| Piece | State |
+|---|---|
+| Manifests | `codeowners`, `issue_tracker`, per-integration `documentation` links. All three pass hassfest (run locally with the official image), both in this repo and as exported standalone repos |
+| HACS | HACS manages one integration per repository, so each is published from its own repo. `scripts/export_hacs_repo.py <domain> <dir>` writes that repo (integration with refreshed vendored core, `hacs.json` with minimum HA 2026.2.0, README, LICENSE, hassfest + HACS workflow, the blueprint for `energy_shopper`). Suggested names: `ha-peoples-gas`, `ha-energy-shopper`, `ha-duquesne-light-collector`. Icons need a home-assistant/brands PR; the exported workflow skips that check until then |
+| Add-on | `collector/DOCS.md` and `CHANGELOG.md` for the store tabs; `config.yaml` passes the add-on linter's schema, and keys that repeated defaults are gone. `.github/workflows/collector-image.yml` builds amd64 on pull requests and, on a `collector-vX.Y.Z` tag matching `config.yaml`, pushes amd64 + arm64 to `ghcr.io/pkmnct/pa-power-notifier-collector` (the package must then be made public for Supervisor to pull it) |
+| CI for this repo | `tests.yml` (stdlib suite on Python 3.11, the three HA suites on 3.13 pinned to pytest-homeassistant-custom-component 0.13.316), `validate.yml` (hassfest, add-on linter, vendored core in sync) |
+| Blueprint | One-click import link in the user guide; resolves once this is on `main` |
+
+Not done, and each needs the owner: merging to `main`, creating the three integration
+repos and their first releases, the first collector tag (publishes the image), making the
+GHCR package public, the brands PR, and a default-store HACS listing.
 
 ## Open questions
 

@@ -1,0 +1,33 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  hassfest:
+    name: hassfest (custom_components)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
+
+  addon:
+    name: Add-on config (collector)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: frenck/action-addon-linter@v2
+        with:
+          path: ./collector
+
+  vendored-core:
+    name: Vendored core matches energy_shopper_core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/vendor_core.py && git diff --exit-code -- custom_components
