@@ -1,0 +1,52 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "description": "Sign in with your peopleseaccount.com username and password.",
+        "data": {
+          "username": "[%key:common::config_flow::data::username%]",
+          "password": "[%key:common::config_flow::data::password%]"
+        }
+      },
+      "reauth_confirm": {
+        "title": "[%key:common::config_flow::title::reauth%]",
+        "description": "The Peoples Gas portal rejected the saved login for {username}. Enter the current password.",
+        "data": {
+          "username": "[%key:common::config_flow::data::username%]",
+          "password": "[%key:common::config_flow::data::password%]"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+      "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
+      "unknown": "[%key:common::config_flow::error::unknown%]"
+    },
+    "abort": {
+      "already_configured": "[%key:common::config_flow::abort::already_configured_account%]",
+      "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",
+      "wrong_account": "This login belongs to a different Peoples Gas account than the one being reauthenticated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "save_bill_pdfs": "Save bill PDFs"
+        },
+        "data_description": {
+          "save_bill_pdfs": "Download each bill PDF into the peoples_gas folder of your Home Assistant configuration directory."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "price_to_compare": { "name": "Price to Compare" },
+      "commodity_rate": { "name": "Commodity rate" },
+      "last_bill_amount": { "name": "Last bill amount" },
+      "last_bill_date": { "name": "Last bill date" },
+      "current_balance": { "name": "Current balance" }
+    }
+  }
+}
