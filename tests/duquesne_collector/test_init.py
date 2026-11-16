@@ -511,6 +511,24 @@ async def test_archive_shrink_resyncs_and_imports_missed_hours(
     assert cons[-1]["sum"] == pytest.approx(DAILY_ONLY * 30.0 + HOURS * KWH)
 
 
+async def test_archive_shrink_during_restart_resyncs_on_first_poll(
+    hass: HomeAssistant, collector: FakeCollector, config_entry
+) -> None:
+    """The add-on is reinstalled while HA restarts: the saved count is stale on load."""
+    full = [dict(h) for h in collector.hourly]
+    collector.hourly = full[:50] + full[55:]  # HA was down: 5 hours never imported
+    await _setup(hass, config_entry)
+    assert len((await _stats(hass))[CONSUMPTION_ID]) == DAILY_ONLY + HOURS - 5
+
+    collector.hourly, collector.daily = [dict(h) for h in full[40:]], []  # new, smaller archive
+    assert await hass.config_entries.async_reload(config_entry.entry_id)  # the restart's one poll
+    await hass.async_block_till_done()
+    await async_wait_recording_done(hass)
+    cons = (await _stats(hass))[CONSUMPTION_ID]
+    assert len(cons) == DAILY_ONLY + HOURS  # caught on the first poll, not an hour later
+    assert cons[-1]["sum"] == pytest.approx(DAILY_ONLY * 30.0 + HOURS * KWH)
+
+
 async def test_rebuild_keeps_newer_cost_the_archive_hasnt_priced(
     hass: HomeAssistant, collector: FakeCollector, config_entry
 ) -> None:

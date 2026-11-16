@@ -396,6 +396,12 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
         cost_due = last_cost_start is None and (
             self._last_full_fetch is None or now - self._last_full_fetch >= FULL_FETCH_EVERY
         )
+        if self._known_hours is None and last_start is not None:
+            saved = await self._store.async_load() or {}
+            # Only valid for the series it was counted against: a cleared or edited
+            # statistic means it has to be learned again.
+            if saved.get("through") == last_start.timestamp():
+                self._known_hours = saved.get("known_hours")
         if (
             self._known_hours is not None
             and archive_hours is not None
@@ -404,14 +410,10 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
             # The archive shrank (add-on reinstalled, or another collector): the count no
             # longer describes it, and hours we missed would never show as a shortfall.
             # Treat it as unknown, so this poll rebuilds (without losing history) and resyncs.
+            # Checked after the load above, so a count saved before a restart is caught on
+            # the first poll too.
             self._known_hours = None
             await self._store.async_remove()
-        if self._known_hours is None and last_start is not None:
-            saved = await self._store.async_load() or {}
-            # Only valid for the series it was counted against: a cleared or edited
-            # statistic means it has to be learned again.
-            if saved.get("through") == last_start.timestamp():
-                self._known_hours = saved.get("known_hours")
         if last_start is None or self._known_hours is None:
             mode = FULL  # first import, or the imported count isn't known
         else:
