@@ -166,7 +166,9 @@ async def test_time_of_use_wins(hass: HomeAssistant, power_switch: FakePowerSwit
     data = entry.runtime_data.data
     # Midnight-only backfill days are left out of the Time-of-Use mix.
     assert data.tou.days_analyzed in (HOURLY_DAYS, HOURLY_DAYS + 1)
-    assert data.tou.super_off_peak_pct > 50
+    # hourly_kwh puts 52% of a weekday's kWh and 45% of a weekend day's in super off-peak,
+    # so the 60-day mix sits near 50% and shifts with the date: test the floor, not 50.
+    assert data.tou.super_off_peak_pct > 45
     assert data.decision.recommended.is_tou and data.decision.tou_recommended is True
 
     assert state(hass, "electric_recommendation").state == "switch"
