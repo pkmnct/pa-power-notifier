@@ -498,7 +498,8 @@ def test_merge_rebuild_only_zeroes_superseded_daily_totals() -> None:
         {"start": h(-24).timestamp(), "state": 20.0, "sum": 20.0},  # older history
         {"start": h(0).timestamp(), "state": 24.0, "sum": 44.0},  # day 1: a daily total only
         {"start": h(24).timestamp(), "state": 1.0, "sum": 45.0},  # day 2: hourly, incl. 00:00
-        {"start": h(29).timestamp(), "state": 1.0, "sum": 46.0},  # 05:00, the archive lacks it
+        {"start": h(25).timestamp(), "state": 1.0, "sum": 46.0},  # and 01:00 (so not a total)
+        {"start": h(29).timestamp(), "state": 1.0, "sum": 47.0},  # 05:00, the archive lacks it
         {"start": h(40).timestamp(), "state": 2.0, "sum": 48.0},  # newer than the archive
     ]
     # The archive: day 1 hourly from 01:00 (no 00:00 reading), day 2 without 00:00 or 05:00.
@@ -528,6 +529,44 @@ def test_merge_rebuild_keeps_ha_hours_over_an_archive_daily_total() -> None:
     assert by_start[h(0)] == 1.0  # HA's 00:00 hour, not the archive's 24 kWh total
     assert [by_start[h(n)] for n in range(1, 24)] == [1.0] * 23
     assert merged[-1]["sum"] == pytest.approx(24 * 1.0 + 3 * 2.0)  # day 1 counted once
+
+
+def test_merge_rebuild_archive_remainder_yields_to_ha_hours() -> None:
+    """A reinstalled archive's first day: a remainder at midnight, then hours from 14:00."""
+    tz = dt_util.get_default_time_zone()
+    day = datetime(2026, 10, 5, tzinfo=tz)
+    h = lambda n: dt_util.as_utc(day + timedelta(hours=n))  # noqa: E731
+    stored = [{"start": h(n).timestamp(), "state": 1.0, "sum": float(n + 1)} for n in range(24)]  # HA: hourly
+    new = [{"start": h(0), "state": 14.0, "sum": 0.0}]  # remainder for 00:00–13:00
+    new += [{"start": h(n), "state": 1.0, "sum": 0.0} for n in range(14, 24)]
+    merged = merge_rebuild(new, stored, tz)
+    assert {r["start"]: r["state"] for r in merged}[h(0)] == 1.0  # HA's 00:00 hour, not 14 kWh
+    assert merged[-1]["sum"] == pytest.approx(24.0)  # each hour once
+
+
+def test_merge_rebuild_archive_remainder_fills_what_ha_lacks() -> None:
+    """HA has none of the remainder's hours: the remainder is the only record of them."""
+    tz = dt_util.get_default_time_zone()
+    day = datetime(2026, 10, 5, tzinfo=tz)
+    h = lambda n: dt_util.as_utc(day + timedelta(hours=n))  # noqa: E731
+    stored = [{"start": h(n).timestamp(), "state": 1.0, "sum": float(n - 13)} for n in range(14, 24)]
+    new = [{"start": h(0), "state": 14.0, "sum": 0.0}]
+    new += [{"start": h(n), "state": 1.0, "sum": 0.0} for n in range(14, 24)]
+    merged = merge_rebuild(new, stored, tz)
+    assert merged[-1]["sum"] == pytest.approx(24.0)
+
+
+def test_merge_rebuild_ha_remainder_yields_to_archive_hours() -> None:
+    """HA imported a remainder earlier; this archive has those hours individually."""
+    tz = dt_util.get_default_time_zone()
+    day = datetime(2026, 10, 5, tzinfo=tz)
+    h = lambda n: dt_util.as_utc(day + timedelta(hours=n))  # noqa: E731
+    stored = [{"start": h(0).timestamp(), "state": 14.0, "sum": 14.0}]  # remainder
+    stored += [{"start": h(n).timestamp(), "state": 1.0, "sum": float(n + 1)} for n in range(14, 24)]
+    new = [{"start": h(n), "state": 1.0, "sum": 0.0} for n in range(1, 24)]  # 01:00 on, no 00:00
+    merged = merge_rebuild(new, stored, tz)
+    assert {r["start"]: r["state"] for r in merged}[h(0)] == 0.0
+    assert merged[-1]["sum"] == pytest.approx(23.0)
 
 
 async def test_reinstalled_archive_daily_history_does_not_double_count(

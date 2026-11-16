@@ -100,14 +100,22 @@ class Point:
     cost: float | None
 
 
-def archived_hours(body: dict[str, Any]) -> list[datetime]:
-    """The hour starts a /usage response holds (UTC), as usage_points reads them."""
-    hours = []
+def _hourly_rows(body: dict[str, Any]) -> list[tuple[datetime, dict[str, Any]]]:
+    """
+    The usable hourly rows of a /usage response, as (UTC hour start, row): the one rule
+    for what counts as an hour, shared by what's imported and what's counted.
+    """
+    rows = []
     for row in body.get("hourly") or []:
         start = _parse_dt(row.get("start"))
         if start is not None and not start.minute and not start.second:
-            hours.append(start)
-    return hours
+            rows.append((start, row))
+    return rows
+
+
+def archived_hours(body: dict[str, Any]) -> list[datetime]:
+    """The hour starts a /usage response holds (UTC), exactly the ones usage_points imports."""
+    return [start for start, _ in _hourly_rows(body)]
 
 
 def usage_points(body: dict[str, Any], backfill: bool) -> list[Point]:
@@ -118,12 +126,7 @@ def usage_points(body: dict[str, Any], backfill: bool) -> list[Point]:
     history back a fixed number of hours, so its oldest day usually starts mid-day): that
     day's daily total less the hours it does have.
     """
-    points: list[Point] = []
-    for row in body.get("hourly") or []:
-        start = _parse_dt(row.get("start"))
-        if start is None or start.minute or start.second:
-            continue
-        points.append(Point(start, float(row.get("kwh") or 0), row.get("cost")))
+    points = [Point(start, float(row.get("kwh") or 0), row.get("cost")) for start, row in _hourly_rows(body)]
     points.sort(key=lambda p: p.start)
     if backfill:
         tz = dt_util.get_default_time_zone()
@@ -190,13 +193,14 @@ def merge_rebuild(new: list[StatisticData], stored: list[dict[str, Any]], tz: An
     collector starts empty).
 
     Stored rows before local midnight of the archive's first day are left alone, and the
-    rebuilt sums continue from the last of them. A daily total is a series' only row for
-    its day, at local midnight; hourly rows beat a daily total for the same day, both
-    ways, so no day counts twice:
-    - a stored daily total on a day the archive has hourly, inside the archive's span,
-      is set to zero;
-    - an archive daily total on a day HA already has hourly (a reinstalled collector's
-      longer daily history) is dropped, and HA's hours are kept.
+    rebuilt sums continue from the last of them. An aggregate is a midnight row with no
+    01:00 row beside it (a daily total, or a first day's remainder); it stands for the
+    hours from 01:00 to its series' next row that day. Individual hours beat an
+    aggregate, both ways, so no hour counts twice:
+    - HA's aggregate whose hours the archive has, inside the archive's span, is set to
+      zero;
+    - the archive's aggregate whose hours HA has (a reinstalled collector's longer daily
+      history, or its first day's remainder) is dropped, and HA's hours are kept.
     Anything else the archive lacks is real data HA has and the archive doesn't (rows
     newer than the archive's last one, after a reinstall or a switch to another
     collector; an hour a new collector missed), so it keeps its value. Every row from
@@ -213,29 +217,54 @@ def merge_rebuild(new: list[StatisticData], stored: list[dict[str, Any]], tz: An
     # is merged (and superseded) even when the archive's first hour is 01:00 or later.
     cutoff = first_local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
 
-    def per_day(starts: list[datetime]) -> dict[date, int]:
-        counts: dict[date, int] = {}
-        for start in starts:
-            day = start.astimezone(tz).date()
-            counts[day] = counts.get(day, 0) + 1
-        return counts
-
     def is_midnight(start: datetime) -> bool:
         local = start.astimezone(tz)
         return (local.hour, local.minute) == (0, 0)
 
-    new_per_day = per_day([r["start"] for r in new])
-    stored_per_day = per_day([dt_util.utc_from_timestamp(r["start"]) for r in stored])
-    # An archive daily total where HA has the day hourly: keep HA's hours instead.
-    new = [
-        r
-        for r in new
-        if not (
-            is_midnight(r["start"])
-            and new_per_day[r["start"].astimezone(tz).date()] == 1
-            and stored_per_day.get(r["start"].astimezone(tz).date(), 0) > 1
-        )
-    ]
+    def by_day(starts: list[float]) -> dict[date, list[float]]:
+        days: dict[date, list[float]] = {}
+        for ts in sorted(starts):
+            days.setdefault(dt_util.utc_from_timestamp(ts).astimezone(tz).date(), []).append(ts)
+        return days
+
+    new_days = by_day([r["start"].timestamp() for r in new])
+    stored_days = by_day([r["start"] for r in stored])
+
+    def aggregate_span(ts: float, days: dict[date, list[float]]) -> tuple[float, float] | None:
+        """
+        For a midnight row with no 01:00 row beside it, the hours it stands for: from
+        01:00 up to (not including) its series' next row that day, or the next midnight.
+        It's a daily total, or a first day's remainder (the day's total less its later
+        hours). None for a row that's just its hour.
+        """
+        start = dt_util.utc_from_timestamp(ts)
+        if not is_midnight(start):
+            return None
+        day_rows = days.get(start.astimezone(tz).date(), [])
+        one_am = (start + timedelta(hours=1)).timestamp()
+        if one_am in day_rows:
+            return None
+        later = [t for t in day_rows if t > ts]
+        if later:
+            return one_am, later[0]
+        next_midnight = (start.astimezone(tz) + timedelta(days=1)).replace(hour=0, minute=0)
+        return one_am, dt_util.as_utc(next_midnight).timestamp()
+
+    def has_rows(days: dict[date, list[float]], day: date, span: tuple[float, float]) -> bool:
+        return any(span[0] <= t < span[1] for t in days.get(day, []))
+
+    # An archive aggregate whose hours HA has (some of) individually: keep HA's hours.
+    # Otherwise it would replace HA's 00:00 hour while HA's other hours stay, counting
+    # them twice (a reinstalled collector's longer daily history, or its first day's
+    # remainder).
+    kept = []
+    for r in new:
+        ts = r["start"].timestamp()
+        span = aggregate_span(ts, new_days)
+        if span is not None and has_rows(stored_days, r["start"].astimezone(tz).date(), span):
+            continue
+        kept.append(r)
+    new = kept
     new_starts = {r["start"].timestamp() for r in new}
     total = 0.0
     rows = [(r["start"], float(r["state"] or 0.0)) for r in new]
@@ -247,16 +276,11 @@ def merge_rebuild(new: list[StatisticData], stored: list[dict[str, Any]], tz: An
         if ts in new_starts:
             continue
         start = dt_util.utc_from_timestamp(ts)
-        day = start.astimezone(tz).date()
-        # A daily total: HA's only row for its day, at midnight (a real 00:00 reading has
-        # other hours beside it). Superseded once the archive has that day hourly.
-        superseded_daily_total = (
-            ts <= last
-            and is_midnight(start)
-            and stored_per_day.get(day, 0) == 1
-            and new_per_day.get(day, 0) > 1
-        )
-        rows.append((start, 0.0 if superseded_daily_total else float(row.get("state") or 0.0)))
+        # HA's aggregate whose hours the archive has individually, inside the archive's
+        # span: superseded by them.
+        span = aggregate_span(ts, stored_days) if ts <= last else None
+        superseded = span is not None and has_rows(new_days, start.astimezone(tz).date(), span)
+        rows.append((start, 0.0 if superseded else float(row.get("state") or 0.0)))
     rows.sort(key=lambda r: r[0])
     merged: list[StatisticData] = []
     for start, state in rows:
