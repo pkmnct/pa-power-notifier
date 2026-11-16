@@ -100,6 +100,33 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(status["first_started_at"], first.state["first_started_at"])
         self.assertIsNotNone(first.state["first_started_at"])
 
+    def test_upgrade_keeps_a_failing_collector_stale(self):
+        """A status file from before first_started_at, with runs but no success."""
+        os.environ["DATA_DIR"] = self.tmp.name
+        try:
+            col._write_json(col.status_path(), {
+                "last_success": None,
+                "last_error": {"at": "2026-11-15T04:31:00-05:00", "type": "blocked", "message": "bot wall"},
+                "last_run": {"started_at": "2026-11-15T04:30:00-05:00", "ok": False},
+            })
+            status = col.Collector().status()
+        finally:
+            os.environ.pop("DATA_DIR", None)
+        self.assertEqual(status["first_started_at"], col.FIRST_START_UNKNOWN)
+
+    def test_upgrade_of_a_working_collector_starts_now(self):
+        os.environ["DATA_DIR"] = self.tmp.name
+        try:
+            col._write_json(col.status_path(), {
+                "last_success": "2026-11-15T04:40:00-05:00",
+                "last_error": None,
+                "last_run": {"started_at": "2026-11-15T04:30:00-05:00", "ok": True},
+            })
+            collector = col.Collector()
+        finally:
+            os.environ.pop("DATA_DIR", None)
+        self.assertEqual(collector.state["first_started_at"], col._iso(collector.started_at))
+
     def test_next_run(self):
         now = datetime(2026, 11, 15, 5, 0).astimezone()  # local (America/New_York, EST)
         self.assertEqual(col.Collector.next_after(now, [(4, 30), (16, 0)]).hour, 16)

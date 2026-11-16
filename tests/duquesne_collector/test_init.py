@@ -340,34 +340,12 @@ async def test_rebuild_clears_rows_the_new_import_doesnt_cover(
     await _poll(hass, config_entry)
 
     cons = (await _stats(hass))[CONSUMPTION_ID]
-    assert not any(r["start"] == midnight.timestamp() for r in cons)  # the stale daily row is gone
-    assert len(cons) == (DAILY_ONLY - 1) + len(extra) + HOURS
+    stale = [r for r in cons if r["start"] == midnight.timestamp()]
+    assert [r["state"] for r in stale] == [0.0]  # the old daily total no longer counts
+    assert len(cons) == (DAILY_ONLY - 1) + 1 + len(extra) + HOURS
     assert cons[-1]["sum"] == pytest.approx((DAILY_ONLY - 1) * 30.0 + (len(extra) + HOURS) * KWH)
     sums = [r["sum"] for r in cons]
     assert sums == sorted(sums)
-
-
-async def test_failed_full_read_after_restart_keeps_sensors(
-    hass: HomeAssistant, collector: FakeCollector, config_entry
-) -> None:
-    """After a restart the archive is read in full; if that times out, import new hours only."""
-    await _setup(hass, config_entry)
-    collector.add_hours(2, priced=True)
-    collector.full_read_fails = True
-    assert await hass.config_entries.async_reload(config_entry.entry_id)  # a restart, as far as the entry knows
-    await hass.async_block_till_done()
-    await async_wait_recording_done(hass)
-
-    assert config_entry.state is ConfigEntryState.LOADED
-    assert hass.states.get(S + "electric_supplier").state == "Example Energy of PA LLC"
-    stats = await _stats(hass)
-    assert len(stats[CONSUMPTION_ID]) == DAILY_ONLY + HOURS + 2
-    assert stats[CONSUMPTION_ID][-1]["sum"] == pytest.approx(DAILY_ONLY * 30.0 + (HOURS + 2) * KWH)
-    assert collector.usage_starts[-1].endswith("Z")  # fell back to new hours
-
-    collector.full_read_fails = False
-    await _poll(hass, config_entry)
-    assert collector.usage_starts[-1] == "2000-01-01"  # the full read is tried again
 
 
 async def test_first_import_still_fails_without_a_full_read(
@@ -408,3 +386,83 @@ async def test_cost_backfill_does_not_rewrite_consumption(
     stats = await _stats(hass)
     assert len(stats[COST_ID]) == len(stats[CONSUMPTION_ID]) == DAILY_ONLY + HOURS + 2
     assert stats[CONSUMPTION_ID][-1]["sum"] == pytest.approx(DAILY_ONLY * 30.0 + (HOURS + 2) * KWH)
+
+
+async def test_restart_stays_incremental(hass: HomeAssistant, collector: FakeCollector, config_entry) -> None:
+    """The imported count is saved, so a restart doesn't rebuild to learn it again."""
+    await _setup(hass, config_entry)
+    collector.add_hours(2, priced=True)
+    starts_before = len(collector.usage_starts)
+    assert await hass.config_entries.async_reload(config_entry.entry_id)
+    await hass.async_block_till_done()
+    await async_wait_recording_done(hass)
+    new_starts = collector.usage_starts[starts_before:]
+    assert new_starts and all(s.endswith("Z") for s in new_starts)
+    stats = await _stats(hass)
+    assert len(stats[CONSUMPTION_ID]) == DAILY_ONLY + HOURS + 2
+
+
+async def test_failed_full_read_keeps_sensors(hass: HomeAssistant, collector: FakeCollector, config_entry) -> None:
+    """When the count has to be learned again and the full read times out, import new hours only."""
+    await _setup(hass, config_entry)
+    collector.add_hours(2, priced=True)
+    collector.full_read_fails = True
+    await coordinator_module.CollectorCoordinator.async_remove_state(hass, config_entry.entry_id)
+    assert await hass.config_entries.async_reload(config_entry.entry_id)
+    await hass.async_block_till_done()
+    await async_wait_recording_done(hass)
+
+    assert config_entry.state is ConfigEntryState.LOADED
+    assert hass.states.get(S + "electric_supplier").state == "Example Energy of PA LLC"
+    stats = await _stats(hass)
+    assert len(stats[CONSUMPTION_ID]) == DAILY_ONLY + HOURS + 2
+    assert stats[CONSUMPTION_ID][-1]["sum"] == pytest.approx(DAILY_ONLY * 30.0 + (HOURS + 2) * KWH)
+    assert collector.usage_starts[-1].endswith("Z")  # fell back to new hours
+
+    collector.full_read_fails = False
+    await _poll(hass, config_entry)
+    assert collector.usage_starts[-1] == "2000-01-01"  # the full read is tried again
+
+
+async def test_rebuild_keeps_history_the_archive_no_longer_holds(
+    hass: HomeAssistant, collector: FakeCollector, config_entry
+) -> None:
+    """The add-on is reinstalled (its archive wiped) and its first run has only a few hours."""
+    await _setup(hass, config_entry)
+    before = (await _stats(hass))[CONSUMPTION_ID]
+    total_before = before[-1]["sum"]
+
+    collector.add_hours(3, priced=True)
+    collector.hourly, collector.daily = collector.hourly[-5:], []  # 2 known hours + 3 new
+    await _poll(hass, config_entry)
+    cons = (await _stats(hass))[CONSUMPTION_ID]
+    assert len(cons) == len(before) + 3  # nothing deleted
+    assert [r["start"] for r in cons[: len(before)]] == [r["start"] for r in before]
+    assert cons[-1]["sum"] == pytest.approx(total_before + 3 * KWH)
+    sums = [r["sum"] for r in cons]
+    assert sums == sorted(sums)
+
+
+async def test_status_usage_race_does_not_rebuild(
+    hass: HomeAssistant, collector: FakeCollector, config_entry
+) -> None:
+    """Hours archived between the /status and /usage reads make the import larger, not smaller."""
+    await _setup(hass, config_entry)
+    real_status = collector.status
+
+    def status_then_new_hours() -> dict:
+        body = real_status()
+        collector.add_hours(2, priced=True)  # the collector's run merges right after /status
+        return body
+
+    collector.status = status_then_new_hours
+    starts_before = len(collector.usage_starts)
+    await _poll(hass, config_entry)
+    collector.status = real_status
+    assert all(s.endswith("Z") for s in collector.usage_starts[starts_before:])  # no full read
+    stats = await _stats(hass)
+    assert len(stats[CONSUMPTION_ID]) == DAILY_ONLY + HOURS + 2
+
+    starts_before = len(collector.usage_starts)
+    await _poll(hass, config_entry)  # and the count is right afterwards
+    assert all(s.endswith("Z") for s in collector.usage_starts[starts_before:])

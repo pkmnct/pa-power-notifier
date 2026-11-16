@@ -25,7 +25,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: CollectorConfigEntry) -
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: CollectorConfigEntry) -> None:
-    """Drop this entry's repair issues. Statistics stay, as with core Opower."""
+    """Drop this entry's repair issues and saved import count. Statistics stay, as with core Opower."""
+    await CollectorCoordinator.async_remove_state(hass, entry.entry_id)
     for domain, issue_id in list(ir.async_get(hass).issues):
         if domain == DOMAIN and issue_id.endswith(entry.entry_id):
             ir.async_delete_issue(hass, DOMAIN, issue_id)

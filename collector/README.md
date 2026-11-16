@@ -135,7 +135,8 @@ Duquesne default service. `current` is the newest dated bill.
 ```
 
 `started_at` is this process's start; `first_started_at` is the first start this
-archive saw, kept across restarts. `last_error.type` is `auth` (bad or missing credentials), `blocked` (logged in, but the
+archive saw, kept across restarts (`1970-01-01T00:00:00+00:00` for a collector that ran
+without success before this field existed: its real first start is unknown). `last_error.type` is `auth` (bad or missing credentials), `blocked` (logged in, but the
 bot wall kept the usage token out of reach), or an exception name. `last_error` stays
 set after a later success, so compare its time with `last_success`.
 

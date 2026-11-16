@@ -23,6 +23,7 @@ from homeassistant.components.recorder.models import (
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
+    statistics_during_period,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_API_TOKEN, CONF_URL, UnitOfEnergy
@@ -30,6 +31,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import EnergyConverter
@@ -52,6 +54,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # How _import_usage reads the archive (see fetch()).
 FULL, COST, NEW = "full", "cost", "new"
+STORAGE_VERSION = 1
 
 type CollectorConfigEntry = ConfigEntry[CollectorCoordinator]
 
@@ -157,6 +160,47 @@ def build_statistics(
     return consumption, cost
 
 
+def merge_rebuild(new: list[StatisticData], stored: list[dict[str, Any]], tz: Any) -> list[StatisticData]:
+    """
+    A rebuilt series (rows from the archive, sums from zero) laid over what's stored,
+    without losing history the archive doesn't hold (an add-on reinstall wipes it; a new
+    collector starts empty).
+
+    Stored rows before the archive's first row are left alone, and the rebuilt sums
+    continue from the last of them. From there on, the archive is the truth for every
+    local day it has data for: a stored row on such a day that the archive doesn't
+    cover (a daily total whose day now has hourly rows) is set to zero, not deleted.
+    Stored rows on days the archive has nothing for are kept. Every row from the first
+    archive row on is returned, so all sums are consistent.
+
+    stored: the series' rows as statistics_during_period returns them (start as a
+    timestamp, state, sum), oldest first.
+    """
+    if not new:
+        return []
+    first = new[0]["start"].timestamp()
+    covered = {r["start"].astimezone(tz).date() for r in new}
+    new_starts = {r["start"].timestamp() for r in new}
+    total = 0.0
+    rows = [(r["start"], float(r["state"] or 0.0)) for r in new]
+    for row in stored:
+        ts = row["start"]
+        if ts < first:
+            total = float(row.get("sum") or 0.0)
+            continue
+        if ts in new_starts:
+            continue
+        start = dt_util.utc_from_timestamp(ts)
+        replaced = start.astimezone(tz).date() in covered
+        rows.append((start, 0.0 if replaced else float(row.get("state") or 0.0)))
+    rows.sort(key=lambda r: r[0])
+    merged: list[StatisticData] = []
+    for start, state in rows:
+        total += state
+        merged.append(StatisticData(start=start, state=state, sum=total))
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # Coordinator
 # ---------------------------------------------------------------------------
@@ -184,6 +228,12 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
         # means the collector added hours we skipped (its first-run backfill, gap fills,
         # anything while HA was down), and the series is rebuilt. None: not yet known.
         self._known_hours: int | None = None
+        # Kept across restarts, so a restart doesn't have to rebuild to learn it again.
+        self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}")
+
+    @staticmethod
+    async def async_remove_state(hass: HomeAssistant, entry_id: str) -> None:
+        await Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry_id}").async_remove()
 
     def _issue_id(self, kind: str) -> str:
         return f"{kind}_{self.config_entry.entry_id}"
@@ -323,8 +373,14 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
         cost_due = last_cost_start is None and (
             self._last_full_fetch is None or now - self._last_full_fetch >= FULL_FETCH_EVERY
         )
+        if self._known_hours is None and last_start is not None:
+            saved = await self._store.async_load() or {}
+            # Only valid for the series it was counted against: a cleared or edited
+            # statistic means it has to be learned again.
+            if saved.get("through") == last_start.timestamp():
+                self._known_hours = saved.get("known_hours")
         if last_start is None or self._known_hours is None:
-            mode = FULL  # first import, or after a restart: the imported count isn't known
+            mode = FULL  # first import, or the imported count isn't known
         else:
             mode = COST if cost_due else NEW
         mode, consumption, cost = await fetch_or_fall_back(mode)
@@ -332,10 +388,12 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
             mode != FULL
             and self._known_hours is not None
             and archive_hours is not None
-            and self._known_hours + len(consumption) != archive_hours
+            and self._known_hours + len(consumption) < archive_hours
         ):
             # The archive holds hours we never saw (the collector's first-run backfill
             # landed after our first import, or it filled a gap): rebuild the series.
+            # Only a shortfall counts: /status is read before /usage, so hours the
+            # collector archives in between make the import look larger, not smaller.
             _LOGGER.debug("Collector archive has %s hours, %s imported: rebuilding", archive_hours, self._known_hours)
             try:
                 consumption, cost = await fetch(FULL)
@@ -348,22 +406,26 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
             # The archive's own count, not the response's: a record the API skips must not
             # make every later poll look like a mismatch.
             self._known_hours = archive_hours if archive_hours is not None else len(consumption)
-            # Importing only overwrites rows with the same start, so clear first: an old row
-            # the new import doesn't cover (a daily total whose day now has hourly data but
-            # no 00:00 reading) would keep its old state and sum. The recorder runs queued
-            # tasks in order, so the clear lands before the import below.
-            stale = [
-                statistic_id
-                for statistic_id, stored, rows in (
-                    (consumption_id, last_start, consumption),
-                    (cost_id, last_cost_start, cost),
-                )
-                if stored is not None and rows
-            ]
-            if stale:
-                recorder.async_clear_statistics(stale)
+            # Lay the rebuilt rows over what's stored instead of clearing: clearing would
+            # also delete history the archive doesn't hold.
+            stored = await recorder.async_add_executor_job(
+                statistics_during_period,
+                self.hass,
+                datetime(2000, 1, 1, tzinfo=dt_util.UTC),
+                None,
+                {consumption_id, cost_id},
+                "hour",
+                None,
+                {"state", "sum"},
+            )
+            tz = dt_util.get_default_time_zone()
+            consumption = merge_rebuild(consumption, stored.get(consumption_id, []), tz)
+            cost = merge_rebuild(cost, stored.get(cost_id, []), tz)
         elif self._known_hours is not None:
             self._known_hours += len(consumption)
+        newest = consumption[-1]["start"] if consumption else last_start
+        if self._known_hours is not None and newest is not None:
+            await self._store.async_save({"known_hours": self._known_hours, "through": newest.timestamp()})
         name = self.config_entry.title
         if consumption:
             async_add_external_statistics(

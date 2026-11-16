@@ -57,6 +57,8 @@ DEFAULT_PORT = 8765
 DEFAULT_RUN_AT = "04:30"
 DEFAULT_USAGE_DAYS = 30
 RECENT_SUCCESS = timedelta(hours=20)
+# first_started_at for a pre-existing collector that never succeeded: "long ago".
+FIRST_START_UNKNOWN = "1970-01-01T00:00:00+00:00"
 
 # Held while the fetch job writes an archive file and while a request reads one, so
 # the API never sees a half-written JSON file.
@@ -252,7 +254,12 @@ class Collector:
         # Kept across restarts, so a collector that has never succeeded can't look fresh
         # just because it was restarted.
         if not self.state.get("first_started_at"):
-            self.state["first_started_at"] = _iso(self.started_at)
+            if self.state.get("last_run") and not self.state.get("last_success"):
+                # Runs from before this field existed, none successful: it has been failing
+                # for an unknown time, so don't grant it a fresh grace period.
+                self.state["first_started_at"] = FIRST_START_UNKNOWN
+            else:
+                self.state["first_started_at"] = _iso(self.started_at)
             self._save_state()
         self._lock = threading.Lock()
 
