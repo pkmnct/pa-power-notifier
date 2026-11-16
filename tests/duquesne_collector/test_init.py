@@ -495,6 +495,46 @@ def test_merge_rebuild_only_zeroes_superseded_daily_totals() -> None:
     assert sums[-1] == pytest.approx(20.0 + 6 * 1.0 + 1.0 + 1.0 + 2.0)
 
 
+def test_merge_rebuild_keeps_ha_hours_over_an_archive_daily_total() -> None:
+    tz = dt_util.get_default_time_zone()
+    day = datetime(2026, 10, 5, tzinfo=tz)
+    h = lambda n: dt_util.as_utc(day + timedelta(hours=n))  # noqa: E731
+    stored = [{"start": h(n).timestamp(), "state": 1.0, "sum": float(n + 1)} for n in range(24)]  # day 1 hourly
+    new = [{"start": h(0), "state": 24.0, "sum": 0.0}]  # the archive has day 1 as a daily total
+    new += [{"start": h(24 + n), "state": 2.0, "sum": 0.0} for n in range(3)]  # day 2 hourly
+    merged = merge_rebuild(new, stored, tz)
+    by_start = {r["start"]: r["state"] for r in merged}
+    assert by_start[h(0)] == 1.0  # HA's 00:00 hour, not the archive's 24 kWh total
+    assert [by_start[h(n)] for n in range(1, 24)] == [1.0] * 23
+    assert merged[-1]["sum"] == pytest.approx(24 * 1.0 + 3 * 2.0)  # day 1 counted once
+
+
+async def test_reinstalled_archive_daily_history_does_not_double_count(
+    hass: HomeAssistant, collector: FakeCollector, config_entry
+) -> None:
+    """A reinstalled collector has HA's older hourly days only as daily totals."""
+    collector.price_all()
+    await _setup(hass, config_entry)
+    before = await _stats(hass)
+
+    tz = dt_util.get_default_time_zone()
+    last_day = dt_util.parse_datetime(collector.hourly[-1]["start"]).astimezone(tz).date()
+    by_day: dict = {}
+    for row in collector.hourly:
+        d = dt_util.parse_datetime(row["start"]).astimezone(tz).date()
+        if d < last_day:
+            kwh, cost = by_day.get(d, (0.0, 0.0))
+            by_day[d] = (kwh + row["kwh"], cost + row["cost"])
+    collector.hourly = [
+        r for r in collector.hourly if dt_util.parse_datetime(r["start"]).astimezone(tz).date() == last_day
+    ]
+    collector.daily = [{"date": d.isoformat(), "kwh": k, "cost": c} for d, (k, c) in sorted(by_day.items())]
+    await _poll(hass, config_entry)  # smaller archive: rebuild
+    after = await _stats(hass)
+    for statistic_id in (CONSUMPTION_ID, COST_ID):
+        assert after[statistic_id][-1]["sum"] == pytest.approx(before[statistic_id][-1]["sum"])
+
+
 async def test_archive_shrink_resyncs_and_imports_missed_hours(
     hass: HomeAssistant, collector: FakeCollector, config_entry
 ) -> None:
