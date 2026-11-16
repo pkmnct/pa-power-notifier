@@ -166,33 +166,56 @@ def merge_rebuild(new: list[StatisticData], stored: list[dict[str, Any]], tz: An
     without losing history the archive doesn't hold (an add-on reinstall wipes it; a new
     collector starts empty).
 
-    Stored rows before the archive's first row are left alone, and the rebuilt sums
-    continue from the last of them. From there on, the archive is the truth for every
-    local day it has data for: a stored row on such a day that the archive doesn't
-    cover (a daily total whose day now has hourly rows) is set to zero, not deleted.
-    Stored rows on days the archive has nothing for are kept. Every row from the first
-    archive row on is returned, so all sums are consistent.
+    Stored rows before local midnight of the archive's first day are left alone, and the
+    rebuilt sums continue from the last of them. A stored row the archive doesn't have is
+    kept, with one exception: a daily total (HA's only row for its day, at local
+    midnight) on a day the archive now has hourly rows for, inside the archive's own
+    span, is set to zero rather than counted twice. Anything else the archive lacks is real data HA has and the archive doesn't
+    (rows newer than the archive's last one, after a reinstall or a switch to another
+    collector; an hour a new collector missed), so it keeps its value. Every row from
+    the first archive row on is returned, so all sums are consistent.
 
     stored: the series' rows as statistics_during_period returns them (start as a
     timestamp, state, sum), oldest first.
     """
     if not new:
         return []
-    first = new[0]["start"].timestamp()
-    covered = {r["start"].astimezone(tz).date() for r in new}
+    last = new[-1]["start"].timestamp()
+    first_local = new[0]["start"].astimezone(tz)
+    # Merge from local midnight of the archive's first day, so a daily total on that day
+    # is merged (and superseded) even when the archive's first hour is 01:00 or later.
+    cutoff = first_local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+    def per_day(starts: list[datetime]) -> dict[date, int]:
+        counts: dict[date, int] = {}
+        for start in starts:
+            day = start.astimezone(tz).date()
+            counts[day] = counts.get(day, 0) + 1
+        return counts
+
+    new_per_day = per_day([r["start"] for r in new])
+    stored_per_day = per_day([dt_util.utc_from_timestamp(r["start"]) for r in stored])
     new_starts = {r["start"].timestamp() for r in new}
     total = 0.0
     rows = [(r["start"], float(r["state"] or 0.0)) for r in new]
     for row in stored:
         ts = row["start"]
-        if ts < first:
+        if ts < cutoff:
             total = float(row.get("sum") or 0.0)
             continue
         if ts in new_starts:
             continue
         start = dt_util.utc_from_timestamp(ts)
-        replaced = start.astimezone(tz).date() in covered
-        rows.append((start, 0.0 if replaced else float(row.get("state") or 0.0)))
+        local = start.astimezone(tz)
+        # A daily total: HA's only row for its day, at midnight (a real 00:00 reading has
+        # other hours beside it). Superseded once the archive has that day hourly.
+        superseded_daily_total = (
+            ts <= last
+            and (local.hour, local.minute) == (0, 0)
+            and stored_per_day.get(local.date(), 0) == 1
+            and new_per_day.get(local.date(), 0) > 1
+        )
+        rows.append((start, 0.0 if superseded_daily_total else float(row.get("state") or 0.0)))
     rows.sort(key=lambda r: r[0])
     merged: list[StatisticData] = []
     for start, state in rows:
@@ -373,6 +396,16 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
         cost_due = last_cost_start is None and (
             self._last_full_fetch is None or now - self._last_full_fetch >= FULL_FETCH_EVERY
         )
+        if (
+            self._known_hours is not None
+            and archive_hours is not None
+            and archive_hours < self._known_hours
+        ):
+            # The archive shrank (add-on reinstalled, or another collector): the count no
+            # longer describes it, and hours we missed would never show as a shortfall.
+            # Treat it as unknown, so this poll rebuilds (without losing history) and resyncs.
+            self._known_hours = None
+            await self._store.async_remove()
         if self._known_hours is None and last_start is not None:
             saved = await self._store.async_load() or {}
             # Only valid for the series it was counted against: a cleared or edited

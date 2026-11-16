@@ -14,6 +14,7 @@ from custom_components.duquesne_collector import coordinator as coordinator_modu
 from custom_components.duquesne_collector.coordinator import (
     Point,
     build_statistics,
+    merge_rebuild,
     statistic_ids,
     usage_points,
 )
@@ -466,3 +467,68 @@ async def test_status_usage_race_does_not_rebuild(
     starts_before = len(collector.usage_starts)
     await _poll(hass, config_entry)  # and the count is right afterwards
     assert all(s.endswith("Z") for s in collector.usage_starts[starts_before:])
+
+
+def test_merge_rebuild_only_zeroes_superseded_daily_totals() -> None:
+    tz = dt_util.get_default_time_zone()
+    day = datetime(2026, 10, 5, tzinfo=tz)
+    h = lambda n: dt_util.as_utc(day + timedelta(hours=n))  # noqa: E731
+    stored = [  # what HA has
+        {"start": h(-24).timestamp(), "state": 20.0, "sum": 20.0},  # older history
+        {"start": h(0).timestamp(), "state": 24.0, "sum": 44.0},  # day 1: a daily total only
+        {"start": h(24).timestamp(), "state": 1.0, "sum": 45.0},  # day 2: hourly, incl. 00:00
+        {"start": h(29).timestamp(), "state": 1.0, "sum": 46.0},  # 05:00, the archive lacks it
+        {"start": h(40).timestamp(), "state": 2.0, "sum": 48.0},  # newer than the archive
+    ]
+    # The archive: day 1 hourly from 01:00 (no 00:00 reading), day 2 without 00:00 or 05:00.
+    new = [{"start": h(n), "state": 1.0, "sum": 0.0} for n in (1, 2, 3, 25, 26, 30)]
+    merged = merge_rebuild(new, stored, tz)
+    by_start = {r["start"]: r["state"] for r in merged}
+    assert h(-24) not in by_start  # history before the archive's first day: untouched
+    assert by_start[h(0)] == 0.0  # superseded daily total, though before the first hour
+    assert by_start[h(24)] == 1.0  # a real 00:00 reading (day 2 has other hours): kept
+    assert by_start[h(29)] == 1.0  # an hour HA has and this archive lacks: kept
+    assert by_start[h(40)] == 2.0  # past the archive's end: kept
+    sums = [r["sum"] for r in merged]
+    assert sums == sorted(sums)
+    assert sums[0] == pytest.approx(20.0)  # continues from the older history
+    assert sums[-1] == pytest.approx(20.0 + 6 * 1.0 + 1.0 + 1.0 + 2.0)
+
+
+async def test_archive_shrink_resyncs_and_imports_missed_hours(
+    hass: HomeAssistant, collector: FakeCollector, config_entry
+) -> None:
+    """Add-on reinstalled while HA had missed some hours; the new archive is smaller."""
+    full = [dict(h) for h in collector.hourly]
+    collector.hourly = full[:50] + full[55:]  # HA was down: 5 hours never imported
+    await _setup(hass, config_entry)
+    assert len((await _stats(hass))[CONSUMPTION_ID]) == DAILY_ONLY + HOURS - 5
+
+    collector.hourly, collector.daily = [dict(h) for h in full[40:]], []  # new, smaller archive
+    await _poll(hass, config_entry)
+    cons = (await _stats(hass))[CONSUMPTION_ID]
+    assert len(cons) == DAILY_ONLY + HOURS  # the missed hours are in now
+    assert cons[-1]["sum"] == pytest.approx(DAILY_ONLY * 30.0 + HOURS * KWH)
+
+
+async def test_rebuild_keeps_newer_cost_the_archive_hasnt_priced(
+    hass: HomeAssistant, collector: FakeCollector, config_entry
+) -> None:
+    collector.price_all()
+    await _setup(hass, config_entry)
+    before = (await _stats(hass))[COST_ID]
+    assert len(before) == DAILY_ONLY + HOURS
+
+    # Reinstall: the new archive has the last 30 hours, its newest 4 not priced yet.
+    new = [dict(h) for h in collector.hourly[-30:]]
+    for h in new[-4:]:
+        h["cost"] = None
+    collector.hourly, collector.daily = new, []
+    # The rebuild runs with the imported count unknown (as after a restart without it).
+    coordinator = config_entry.runtime_data
+    coordinator._known_hours = None  # noqa: SLF001
+    await coordinator._store.async_remove()  # noqa: SLF001
+    await _poll(hass, config_entry)
+    cost = (await _stats(hass))[COST_ID]
+    assert [r["state"] for r in cost[-4:]] == pytest.approx([KWH * RATE] * 4)  # not zeroed
+    assert cost[-1]["sum"] == pytest.approx(before[-1]["sum"])
