@@ -14,6 +14,10 @@ from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 
+from pytest_homeassistant_custom_component.components.recorder.common import (
+    async_wait_recording_done,
+)
+
 from conftest import ACCOUNT, PASSWORD, USERNAME
 
 CREDS = {CONF_USERNAME: USERNAME, CONF_PASSWORD: PASSWORD}
@@ -111,6 +115,10 @@ async def test_options_flow(recorder_mock, hass: HomeAssistant, portal, config_e
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert config_entry.options == {CONF_SAVE_BILL_PDFS: True}
+    # Saving options reloads the entry, which logs in and imports statistics: let that
+    # finish, or teardown closes the database under the import (a segfault in CI).
+    await hass.async_block_till_done()
+    await async_wait_recording_done(hass)
 
 
 async def test_reauth_when_account_lookup_falls_back(
