@@ -678,3 +678,15 @@ async def test_rebuild_keeps_newer_cost_the_archive_hasnt_priced(
     cost = (await _stats(hass))[COST_ID]
     assert [r["state"] for r in cost[-4:]] == pytest.approx([KWH * RATE] * 4)  # not zeroed
     assert cost[-1]["sum"] == pytest.approx(before[-1]["sum"])
+
+
+async def test_hours_archived_during_a_full_read_are_counted(
+    hass: HomeAssistant, collector: FakeCollector, config_entry
+) -> None:
+    """/status is read before /usage; the collector archives 2 hours in between."""
+    collector.status_lag = 2
+    await _setup(hass, config_entry)  # first import: a full read
+    collector.status_lag = 0
+    reads = len(collector.usage_starts)
+    await _poll(hass, config_entry)  # nothing new
+    assert all(s.endswith("Z") for s in collector.usage_starts[reads:])  # no needless rebuild

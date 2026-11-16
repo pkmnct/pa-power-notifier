@@ -518,9 +518,11 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
             except CollectorError as err:
                 _LOGGER.warning("Rebuilding from the collector's archive failed (%s); trying again next poll", err)
         if mode == FULL:
-            # The archive's own count, not the response's: a record the API skips must not
-            # make every later poll look like a mismatch.
-            self._known_hours = archive_hours if archive_hours is not None else len(hours)
+            # The larger of the archive's own count and the response's: the archive's, so a
+            # record the API skips doesn't make every later poll look like a mismatch; the
+            # response's, because the marker below comes from it, and hours the collector
+            # archived after /status was read are past the marker and must be counted too.
+            self._known_hours = max(archive_hours or 0, len(hours))
             self._archive_through = max(hours, default=None)
             # Lay the rebuilt rows over what's stored instead of clearing: clearing would
             # also delete history the archive doesn't hold.

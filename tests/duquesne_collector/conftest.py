@@ -50,6 +50,7 @@ class FakeCollector:
         ]
         self.last_success = dt_util.now() - timedelta(hours=2)
         self.first_started: datetime | None = None
+        self.status_lag = 0  # hours the collector archives between /status and /usage
         self.last_error: dict | None = None
         self.reject_auth = False
         self.down = False
@@ -84,7 +85,7 @@ class FakeCollector:
             "last_success": _iso(self.last_success) if self.last_success else None,
             "last_error": self.last_error,
             "last_run": {"ok": True},
-            "archive": {"hourly_records": len(self.hourly), "hourly_latest": self.hourly[-1]["start"],
+            "archive": {"hourly_records": len(self.hourly) - self.status_lag, "hourly_latest": self.hourly[-1]["start"],
                         "daily_records": len(self.daily), "bills": len(self.bills)},
         }
 
