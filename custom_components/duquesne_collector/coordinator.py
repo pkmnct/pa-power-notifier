@@ -100,10 +100,23 @@ class Point:
     cost: float | None
 
 
+def archived_hours(body: dict[str, Any]) -> list[datetime]:
+    """The hour starts a /usage response holds (UTC), as usage_points reads them."""
+    hours = []
+    for row in body.get("hourly") or []:
+        start = _parse_dt(row.get("start"))
+        if start is not None and not start.minute and not start.second:
+            hours.append(start)
+    return hours
+
+
 def usage_points(body: dict[str, Any], backfill: bool) -> list[Point]:
     """
     Hourly points from a /usage response. On a backfill, days before the first hour are
-    added from the daily totals as one point at local midnight, as core Opower does.
+    added from the daily totals as one point at local midnight, as core Opower does, and
+    so is the part of the first hourly day before its first hour (the archive pages hourly
+    history back a fixed number of hours, so its oldest day usually starts mid-day): that
+    day's daily total less the hours it does have.
     """
     points: list[Point] = []
     for row in body.get("hourly") or []:
@@ -113,17 +126,27 @@ def usage_points(body: dict[str, Any], backfill: bool) -> list[Point]:
         points.append(Point(start, float(row.get("kwh") or 0), row.get("cost")))
     points.sort(key=lambda p: p.start)
     if backfill:
-        first_hour_day = dt_util.as_local(points[0].start).date() if points else date.max
         tz = dt_util.get_default_time_zone()
+        first_hour = dt_util.as_local(points[0].start) if points else None
+        first_hour_day = first_hour.date() if first_hour else date.max
         daily = []
         for row in body.get("daily") or []:
             try:
                 day = date.fromisoformat(row.get("date") or "")
             except ValueError:
                 continue
+            midnight = dt_util.as_utc(datetime(day.year, day.month, day.day, tzinfo=tz))
             if day < first_hour_day:
-                midnight = datetime(day.year, day.month, day.day, tzinfo=tz)
-                daily.append(Point(dt_util.as_utc(midnight), float(row.get("kwh") or 0), row.get("cost")))
+                daily.append(Point(midnight, float(row.get("kwh") or 0), row.get("cost")))
+            elif day == first_hour_day and first_hour is not None and (first_hour.hour, first_hour.minute) != (0, 0):
+                hours = [p for p in points if dt_util.as_local(p.start).date() == day]
+                kwh = float(row.get("kwh") or 0) - sum(p.kwh for p in hours)
+                if kwh <= 0.001:
+                    continue  # nothing left over (or the daily total lags the hours)
+                cost = None
+                if row.get("cost") is not None and all(p.cost is not None for p in hours):
+                    cost = max(0.0, float(row["cost"]) - sum(float(p.cost) for p in hours))
+                daily.append(Point(midnight, kwh, cost))
         points = sorted(daily, key=lambda p: p.start) + points
     return points
 
@@ -269,6 +292,9 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
         # means the collector added hours we skipped (its first-run backfill, gap fills,
         # anything while HA was down), and the series is rebuilt. None: not yet known.
         self._known_hours: int | None = None
+        # The archive's newest hour when it was last counted: hours newer than it are new
+        # to the archive even if HA already has them (a replacement collector catching up).
+        self._archive_through: datetime | None = None
         # Kept across restarts, so a restart doesn't have to rebuild to learn it again.
         self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}")
 
@@ -370,32 +396,34 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
         now = dt_util.utcnow()
         archive_hours = (status.get("archive") or {}).get("hourly_records")
 
-        async def fetch(mode: str) -> tuple[list[StatisticData], list[StatisticData]]:
+        async def fetch(mode: str) -> tuple[list[StatisticData], list[StatisticData], list[datetime]]:
             """
             FULL re-imports the whole archive (both series rebuilt from zero). COST reads the
             whole archive to backfill a still-empty cost series, but adds only new hours to
-            consumption. NEW fetches only hours after the stored rows.
+            consumption. NEW fetches only hours after the stored rows, and after the newest
+            hour the archive had when we last counted it (so hours it archives that HA
+            already has are seen and counted). Also returns the hours the response held.
             """
             consumption_from = (None, 0.0) if mode == FULL else (last_start, last_sum)
             cost_from = (last_cost_start, last_cost_sum) if mode == NEW else (None, 0.0)
             if mode != NEW:
                 fetch_from = None
-            elif last_cost_start is not None:
-                fetch_from = min(last_start, last_cost_start) + timedelta(hours=1)
             else:
-                fetch_from = last_start + timedelta(hours=1)
+                after = [t for t in (last_start, last_cost_start, self._archive_through) if t is not None]
+                fetch_from = min(after) + timedelta(hours=1)
             body = await self.client.usage(fetch_from)
             if fetch_from is None:
                 # Only once it succeeded: a timed-out full read is retried next poll.
                 self._last_full_fetch = now
-            consumption, cost = build_statistics(
-                usage_points(body, backfill=fetch_from is None), *consumption_from, *cost_from, now
-            )
+            points = usage_points(body, backfill=fetch_from is None)
+            consumption, cost = build_statistics(points, *consumption_from, *cost_from, now)
             if mode == NEW and last_cost_start is None:
                 cost = []  # still unpriced: cost backfills from the start on the daily full read
-            return consumption, cost
+            return consumption, cost, archived_hours(body)
 
-        async def fetch_or_fall_back(mode: str) -> tuple[str, list[StatisticData], list[StatisticData]]:
+        async def fetch_or_fall_back(
+            mode: str,
+        ) -> tuple[str, list[StatisticData], list[StatisticData], list[datetime]]:
             """A full read that fails (it grows with the archive) mustn't take the sensors down."""
             try:
                 return (mode, *await fetch(mode))
@@ -411,6 +439,12 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
                 )
                 return (NEW, *await fetch(NEW))
 
+        def newly_archived(hours: list[datetime], consumption: list[StatisticData]) -> int:
+            """Archive hours added since we last counted: those newer than its newest hour then."""
+            if self._archive_through is None:
+                return len(consumption)  # a count saved before the archive's newest hour was kept
+            return sum(1 for hour in hours if hour > self._archive_through)
+
         cost_due = last_cost_start is None and (
             self._last_full_fetch is None or now - self._last_full_fetch >= FULL_FETCH_EVERY
         )
@@ -420,6 +454,8 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
             # statistic means it has to be learned again.
             if saved.get("through") == last_start.timestamp():
                 self._known_hours = saved.get("known_hours")
+                through = saved.get("archive_through")
+                self._archive_through = dt_util.utc_from_timestamp(through) if through else None
         if (
             self._known_hours is not None
             and archive_hours is not None
@@ -431,17 +467,19 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
             # Checked after the load above, so a count saved before a restart is caught on
             # the first poll too.
             self._known_hours = None
+            self._archive_through = None
             await self._store.async_remove()
         if last_start is None or self._known_hours is None:
             mode = FULL  # first import, or the imported count isn't known
         else:
             mode = COST if cost_due else NEW
-        mode, consumption, cost = await fetch_or_fall_back(mode)
+        mode, consumption, cost, hours = await fetch_or_fall_back(mode)
+        added = newly_archived(hours, consumption) if mode != FULL else 0
         if (
             mode != FULL
             and self._known_hours is not None
             and archive_hours is not None
-            and self._known_hours + len(consumption) < archive_hours
+            and self._known_hours + added < archive_hours
         ):
             # The archive holds hours we never saw (the collector's first-run backfill
             # landed after our first import, or it filled a gap): rebuild the series.
@@ -449,7 +487,7 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
             # collector archives in between make the import look larger, not smaller.
             _LOGGER.debug("Collector archive has %s hours, %s imported: rebuilding", archive_hours, self._known_hours)
             try:
-                consumption, cost = await fetch(FULL)
+                consumption, cost, hours = await fetch(FULL)
                 mode = FULL
             except CollectorAuthError:
                 raise
@@ -458,7 +496,8 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
         if mode == FULL:
             # The archive's own count, not the response's: a record the API skips must not
             # make every later poll look like a mismatch.
-            self._known_hours = archive_hours if archive_hours is not None else len(consumption)
+            self._known_hours = archive_hours if archive_hours is not None else len(hours)
+            self._archive_through = max(hours, default=None)
             # Lay the rebuilt rows over what's stored instead of clearing: clearing would
             # also delete history the archive doesn't hold.
             stored = await recorder.async_add_executor_job(
@@ -475,10 +514,18 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
             consumption = merge_rebuild(consumption, stored.get(consumption_id, []), tz)
             cost = merge_rebuild(cost, stored.get(cost_id, []), tz)
         elif self._known_hours is not None:
-            self._known_hours += len(consumption)
+            self._known_hours += added
+            if hours:
+                self._archive_through = max([*hours, *([self._archive_through] if self._archive_through else [])])
         newest = consumption[-1]["start"] if consumption else last_start
         if self._known_hours is not None and newest is not None:
-            await self._store.async_save({"known_hours": self._known_hours, "through": newest.timestamp()})
+            await self._store.async_save(
+                {
+                    "known_hours": self._known_hours,
+                    "through": newest.timestamp(),
+                    "archive_through": self._archive_through.timestamp() if self._archive_through else None,
+                }
+            )
         name = self.config_entry.title
         if consumption:
             async_add_external_statistics(

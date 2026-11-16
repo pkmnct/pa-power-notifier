@@ -244,12 +244,33 @@ def test_usage_points_ignores_bad_hours_and_daily_overlap() -> None:
         ],
         "daily": [
             {"date": "2026-11-09", "kwh": 20, "cost": 5},
-            {"date": "2026-11-10", "kwh": 24, "cost": 6},  # has hours: not added
+            {"date": "2026-11-10", "kwh": 24, "cost": 6},  # the first hourly day
         ],
     }
     pts = usage_points(body, backfill=True)
-    assert [p.kwh for p in pts] == [20, 1]
+    # The first hourly day starts after midnight: the rest of its daily total is one row
+    # at local midnight (24 − 1 kWh, $6 − $0.10), then the hour itself.
+    assert [p.kwh for p in pts] == [20, 23, 1]
+    assert pts[1].cost == pytest.approx(5.9)
+    assert dt_util.as_local(pts[1].start).hour == 0
     assert [p.kwh for p in usage_points(body, backfill=False)] == [1]
+
+
+def test_usage_points_first_day_remainder_waits_for_unpriced_hours() -> None:
+    body = {
+        "hourly": [
+            {"start": "2026-11-10T05:00:00-05:00", "kwh": 1, "cost": None},  # not priced yet
+            {"start": "2026-11-10T06:00:00-05:00", "kwh": 2, "cost": 0.2},
+        ],
+        "daily": [{"date": "2026-11-10", "kwh": 2.5, "cost": 1.0}],
+    }
+    pts = usage_points(body, backfill=True)
+    # The daily total is smaller than the hours: nothing left over, no row.
+    assert [p.kwh for p in pts] == [1, 2]
+    body["daily"][0]["kwh"] = 10
+    remainder = usage_points(body, backfill=True)[0]
+    assert remainder.kwh == pytest.approx(7)
+    assert remainder.cost is None  # can't split the cost while an hour is unpriced
 
 
 async def test_failed_full_fetch_is_retried_next_poll(
@@ -567,6 +588,34 @@ async def test_archive_shrink_during_restart_resyncs_on_first_poll(
     cons = (await _stats(hass))[CONSUMPTION_ID]
     assert len(cons) == DAILY_ONLY + HOURS  # caught on the first poll, not an hour later
     assert cons[-1]["sum"] == pytest.approx(DAILY_ONLY * 30.0 + HOURS * KWH)
+
+
+async def test_replacement_collector_catching_up_does_not_rebuild_again(
+    hass: HomeAssistant, collector: FakeCollector, config_entry
+) -> None:
+    """A reinstalled collector trails HA's newest hour, then archives hours HA already has."""
+    collector.price_all()
+    full = [dict(h) for h in collector.hourly]
+    await _setup(hass, config_entry)
+    total = (await _stats(hass))[CONSUMPTION_ID][-1]["sum"]
+
+    collector.hourly, collector.daily = [dict(h) for h in full[30:-10]], []  # behind HA by 10 hours
+    await _poll(hass, config_entry)  # smaller archive: one resync rebuild
+    assert collector.usage_starts[-1] == "2000-01-01"
+    assert (await _stats(hass))[CONSUMPTION_ID][-1]["sum"] == pytest.approx(total)
+
+    collector.hourly += [dict(h) for h in full[-10:-4]]  # the next run: hours HA already has
+    reads = len(collector.usage_starts)
+    await _poll(hass, config_entry)
+    assert all(s.endswith("Z") for s in collector.usage_starts[reads:])  # no full rebuild
+    assert (await _stats(hass))[CONSUMPTION_ID][-1]["sum"] == pytest.approx(total)
+
+    collector.hourly += [dict(h) for h in full[-4:]]
+    collector.add_hours(2, priced=True)  # caught up, and past HA's newest hour
+    reads = len(collector.usage_starts)
+    await _poll(hass, config_entry)
+    assert all(s.endswith("Z") for s in collector.usage_starts[reads:])
+    assert (await _stats(hass))[CONSUMPTION_ID][-1]["sum"] == pytest.approx(total + 2 * KWH)
 
 
 async def test_rebuild_keeps_newer_cost_the_archive_hasnt_priced(
