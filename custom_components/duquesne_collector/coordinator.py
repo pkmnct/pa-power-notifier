@@ -50,6 +50,9 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# How _import_usage reads the archive (see fetch()).
+FULL, COST, NEW = "full", "cost", "new"
+
 type CollectorConfigEntry = ConfigEntry[CollectorCoordinator]
 
 
@@ -275,51 +278,91 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
         last_cost_start, last_cost_sum = await last(cost_id)
         now = dt_util.utcnow()
         archive_hours = (status.get("archive") or {}).get("hourly_records")
-        stored = (last_start, last_sum, last_cost_start, last_cost_sum)
 
-        async def fetch(rebuild: bool) -> tuple[list[StatisticData], list[StatisticData]]:
+        async def fetch(mode: str) -> tuple[list[StatisticData], list[StatisticData]]:
             """
-            A rebuild re-imports the whole archive: importing overwrites rows by start, so
-            every sum is recomputed, and a daily-only day's midnight row is replaced by its
-            00:00 hourly row once hourly data exists. Otherwise only hours after the last
-            stored row are fetched.
+            FULL re-imports the whole archive (both series rebuilt from zero). COST reads the
+            whole archive to backfill a still-empty cost series, but adds only new hours to
+            consumption. NEW fetches only hours after the stored rows.
             """
-            first, first_sum, first_cost, first_cost_sum = (None, 0.0, None, 0.0) if rebuild else stored
-            import_cost = True
-            if rebuild:
+            consumption_from = (None, 0.0) if mode == FULL else (last_start, last_sum)
+            cost_from = (last_cost_start, last_cost_sum) if mode == NEW else (None, 0.0)
+            if mode != NEW:
                 fetch_from = None
-            elif first_cost is not None:
-                fetch_from = min(first, first_cost) + timedelta(hours=1)
+            elif last_cost_start is not None:
+                fetch_from = min(last_start, last_cost_start) + timedelta(hours=1)
             else:
-                # Cost still empty (Opower hasn't priced anything): new hours only, and
-                # cost is left to the daily rebuild so it can backfill from the start.
-                fetch_from = first + timedelta(hours=1)
-                import_cost = False
+                fetch_from = last_start + timedelta(hours=1)
             body = await self.client.usage(fetch_from)
-            if rebuild:
-                # Only once it succeeded: a timed-out full fetch is retried next poll.
+            if fetch_from is None:
+                # Only once it succeeded: a timed-out full read is retried next poll.
                 self._last_full_fetch = now
             consumption, cost = build_statistics(
-                usage_points(body, backfill=rebuild), first, first_sum, first_cost, first_cost_sum, now
+                usage_points(body, backfill=fetch_from is None), *consumption_from, *cost_from, now
             )
-            return consumption, (cost if import_cost else [])
+            if mode == NEW and last_cost_start is None:
+                cost = []  # still unpriced: cost backfills from the start on the daily full read
+            return consumption, cost
+
+        async def fetch_or_fall_back(mode: str) -> tuple[str, list[StatisticData], list[StatisticData]]:
+            """A full read that fails (it grows with the archive) mustn't take the sensors down."""
+            try:
+                return (mode, *await fetch(mode))
+            except CollectorAuthError:
+                raise
+            except CollectorError as err:
+                if mode == NEW or last_start is None:
+                    raise
+                _LOGGER.warning(
+                    "Reading the collector's whole archive failed (%s); importing new hours only "
+                    "and trying the full read again next poll",
+                    err,
+                )
+                return (NEW, *await fetch(NEW))
 
         cost_due = last_cost_start is None and (
             self._last_full_fetch is None or now - self._last_full_fetch >= FULL_FETCH_EVERY
         )
-        rebuild = last_start is None or self._known_hours is None or cost_due
-        consumption, cost = await fetch(rebuild)
-        if not rebuild and archive_hours is not None and self._known_hours + len(consumption) != archive_hours:
+        if last_start is None or self._known_hours is None:
+            mode = FULL  # first import, or after a restart: the imported count isn't known
+        else:
+            mode = COST if cost_due else NEW
+        mode, consumption, cost = await fetch_or_fall_back(mode)
+        if (
+            mode != FULL
+            and self._known_hours is not None
+            and archive_hours is not None
+            and self._known_hours + len(consumption) != archive_hours
+        ):
             # The archive holds hours we never saw (the collector's first-run backfill
             # landed after our first import, or it filled a gap): rebuild the series.
             _LOGGER.debug("Collector archive has %s hours, %s imported: rebuilding", archive_hours, self._known_hours)
-            rebuild = True
-            consumption, cost = await fetch(True)
-        if rebuild:
+            try:
+                consumption, cost = await fetch(FULL)
+                mode = FULL
+            except CollectorAuthError:
+                raise
+            except CollectorError as err:
+                _LOGGER.warning("Rebuilding from the collector's archive failed (%s); trying again next poll", err)
+        if mode == FULL:
             # The archive's own count, not the response's: a record the API skips must not
             # make every later poll look like a mismatch.
             self._known_hours = archive_hours if archive_hours is not None else len(consumption)
-        else:
+            # Importing only overwrites rows with the same start, so clear first: an old row
+            # the new import doesn't cover (a daily total whose day now has hourly data but
+            # no 00:00 reading) would keep its old state and sum. The recorder runs queued
+            # tasks in order, so the clear lands before the import below.
+            stale = [
+                statistic_id
+                for statistic_id, stored, rows in (
+                    (consumption_id, last_start, consumption),
+                    (cost_id, last_cost_start, cost),
+                )
+                if stored is not None and rows
+            ]
+            if stale:
+                recorder.async_clear_statistics(stale)
+        elif self._known_hours is not None:
             self._known_hours += len(consumption)
         name = self.config_entry.title
         if consumption:

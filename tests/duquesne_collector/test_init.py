@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from unittest.mock import patch
+
 import pytest
 
 from custom_components.duquesne_collector.api import CollectorError
 from custom_components.duquesne_collector.const import CONF_STATISTIC_KEY, COST_GRACE, DOMAIN
+from custom_components.duquesne_collector import coordinator as coordinator_module
 from custom_components.duquesne_collector.coordinator import (
     Point,
     build_statistics,
@@ -316,3 +319,92 @@ async def test_never_succeeded_is_stale_across_restarts(
     collector.first_started = dt_util.now() - timedelta(days=3)  # started_at is recent: restarted
     await _setup(hass, config_entry)
     assert issues(hass) == ["collector_stale"]
+
+
+async def test_rebuild_clears_rows_the_new_import_doesnt_cover(
+    hass: HomeAssistant, collector: FakeCollector, config_entry
+) -> None:
+    """A daily-total row whose day later gets hourly data without a 00:00 reading."""
+    await _setup(hass, config_entry)
+    day = dt_util.as_local(collector.first_hour).date() - timedelta(days=1)  # newest daily-only day
+    midnight = datetime(day.year, day.month, day.day, tzinfo=dt_util.get_default_time_zone())
+    cons = (await _stats(hass))[CONSUMPTION_ID]
+    assert any(r["start"] == midnight.timestamp() for r in cons)  # imported as one daily row
+
+    # Opower serves that day's hours, all but 00:00.
+    extra = [
+        {"start": dt_util.as_local(midnight + timedelta(hours=h)).isoformat(), "kwh": KWH, "cost": KWH * RATE}
+        for h in range(1, 24)
+    ]
+    collector.hourly = extra + collector.hourly
+    await _poll(hass, config_entry)
+
+    cons = (await _stats(hass))[CONSUMPTION_ID]
+    assert not any(r["start"] == midnight.timestamp() for r in cons)  # the stale daily row is gone
+    assert len(cons) == (DAILY_ONLY - 1) + len(extra) + HOURS
+    assert cons[-1]["sum"] == pytest.approx((DAILY_ONLY - 1) * 30.0 + (len(extra) + HOURS) * KWH)
+    sums = [r["sum"] for r in cons]
+    assert sums == sorted(sums)
+
+
+async def test_failed_full_read_after_restart_keeps_sensors(
+    hass: HomeAssistant, collector: FakeCollector, config_entry
+) -> None:
+    """After a restart the archive is read in full; if that times out, import new hours only."""
+    await _setup(hass, config_entry)
+    collector.add_hours(2, priced=True)
+    collector.full_read_fails = True
+    assert await hass.config_entries.async_reload(config_entry.entry_id)  # a restart, as far as the entry knows
+    await hass.async_block_till_done()
+    await async_wait_recording_done(hass)
+
+    assert config_entry.state is ConfigEntryState.LOADED
+    assert hass.states.get(S + "electric_supplier").state == "Example Energy of PA LLC"
+    stats = await _stats(hass)
+    assert len(stats[CONSUMPTION_ID]) == DAILY_ONLY + HOURS + 2
+    assert stats[CONSUMPTION_ID][-1]["sum"] == pytest.approx(DAILY_ONLY * 30.0 + (HOURS + 2) * KWH)
+    assert collector.usage_starts[-1].endswith("Z")  # fell back to new hours
+
+    collector.full_read_fails = False
+    await _poll(hass, config_entry)
+    assert collector.usage_starts[-1] == "2000-01-01"  # the full read is tried again
+
+
+async def test_first_import_still_fails_without_a_full_read(
+    hass: HomeAssistant, collector: FakeCollector, config_entry
+) -> None:
+    """With nothing stored yet there's nothing to fall back to."""
+    collector.full_read_fails = True
+    config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(config_entry.entry_id)
+    await hass.async_block_till_done()
+    assert config_entry.state is ConfigEntryState.SETUP_RETRY
+
+
+async def test_cost_backfill_does_not_rewrite_consumption(
+    hass: HomeAssistant, collector: FakeCollector, config_entry
+) -> None:
+    for h in collector.hourly:
+        h["cost"] = None  # never priced so far
+    collector.daily = [dict(d, cost=None) for d in collector.daily]
+    await _setup(hass, config_entry)
+
+    collector.add_hours(2)
+    collector.price_all()
+    collector.daily = [dict(d, cost=7.5) for d in collector.daily]
+    config_entry.runtime_data._last_full_fetch = dt_util.utcnow() - timedelta(hours=25)  # noqa: SLF001
+    imported: dict[str, int] = {}
+    real = coordinator_module.async_add_external_statistics
+
+    def record(hass, metadata, rows):
+        imported[metadata["statistic_id"]] = len(rows)
+        return real(hass, metadata, rows)
+
+    with patch.object(coordinator_module, "async_add_external_statistics", side_effect=record):
+        await _poll(hass, config_entry)
+    assert collector.usage_starts[-1] == "2000-01-01"  # the daily full read, for cost
+    assert imported[CONSUMPTION_ID] == 2  # only the new hours, not the whole archive again
+    assert imported[COST_ID] == DAILY_ONLY + HOURS + 2
+    stats = await _stats(hass)
+    assert len(stats[COST_ID]) == len(stats[CONSUMPTION_ID]) == DAILY_ONLY + HOURS + 2
+    assert stats[CONSUMPTION_ID][-1]["sum"] == pytest.approx(DAILY_ONLY * 30.0 + (HOURS + 2) * KWH)

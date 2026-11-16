@@ -53,6 +53,7 @@ class FakeCollector:
         self.last_error: dict | None = None
         self.reject_auth = False
         self.down = False
+        self.full_read_fails = False  # /usage for the whole archive times out
         self.usage_starts: list[str] = []
         self.bills = [
             {"bill_id": "1", "date": "2026-09-26", "amount_due": 190.0, "supplier": None,
@@ -108,6 +109,8 @@ class FakeCollector:
         elif path == "/bills":
             body = {"bills": self.bills, "current": self.bills[-1]}
         elif path == "/usage":
+            if self.full_read_fails and url.query.get("start") == "2000-01-01":
+                return AiohttpClientMockResponse(method, url, status=504, json={"error": "timeout"})
             body = self.usage(url.query.get("start", ""))
         else:
             return AiohttpClientMockResponse(method, url, status=404, json={"error": "not found"})
