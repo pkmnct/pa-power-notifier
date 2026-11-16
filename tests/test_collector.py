@@ -89,6 +89,17 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(body["current"]["supplier"], "Example Energy")
         self.assertEqual(body["current"]["supply_rate_per_kwh"], 0.1371)
 
+    def test_first_start_survives_restarts(self):
+        os.environ["DATA_DIR"] = self.tmp.name
+        try:
+            first = col.Collector()
+            again = col.Collector()  # a restart: same archive, new process
+            status = again.status()
+        finally:
+            os.environ.pop("DATA_DIR", None)
+        self.assertEqual(status["first_started_at"], first.state["first_started_at"])
+        self.assertIsNotNone(first.state["first_started_at"])
+
     def test_next_run(self):
         now = datetime(2026, 11, 15, 5, 0).astimezone()  # local (America/New_York, EST)
         self.assertEqual(col.Collector.next_after(now, [(4, 30), (16, 0)]).hour, 16)

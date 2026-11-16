@@ -121,6 +121,7 @@ Duquesne default service. `current` is the newest dated bill.
   "service": "duquesne-collector",
   "version": "0.1.0",
   "started_at": "2026-11-15T13:06:01-05:00",
+  "first_started_at": "2026-11-10T09:12:44-05:00",
   "running": false,
   "next_run": "2026-11-16T04:30:00-05:00",
   "last_success": "2026-11-15T13:08:07-05:00",
@@ -133,7 +134,8 @@ Duquesne default service. `current` is the newest dated bill.
 }
 ```
 
-`last_error.type` is `auth` (bad or missing credentials), `blocked` (logged in, but the
+`started_at` is this process's start; `first_started_at` is the first start this
+archive saw, kept across restarts. `last_error.type` is `auth` (bad or missing credentials), `blocked` (logged in, but the
 bot wall kept the usage token out of reach), or an exception name. `last_error` stays
 set after a later success, so compare its time with `last_success`.
 

@@ -177,6 +177,10 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
         )
         self._failing_since: datetime | None = None
         self._last_full_fetch: datetime | None = None
+        # Hourly records we've imported, to compare with the archive's count: a mismatch
+        # means the collector added hours we skipped (its first-run backfill, gap fills,
+        # anything while HA was down), and the series is rebuilt. None: not yet known.
+        self._known_hours: int | None = None
 
     def _issue_id(self, kind: str) -> str:
         return f"{kind}_{self.config_entry.entry_id}"
@@ -200,7 +204,7 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
         try:
             status = await self.client.status()
             bills = await self.client.bills()
-            imported = await self._import_usage()
+            imported = await self._import_usage(status)
         except CollectorAuthError as err:
             # The collector answers but rejects our token (rotated on the add-on): start
             # reauth so the user can enter the new one. It isn't unreachable.
@@ -241,7 +245,9 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
             error_is_current and error.get("type") == "auth",
             message=str(error.get("message") or ""),
         )
-        started = _parse_dt(data.status.get("started_at"))
+        # Without a success, measure from the collector's first start (kept across
+        # restarts); started_at, which resets on every restart, only for older collectors.
+        started = _parse_dt(data.status.get("first_started_at")) or _parse_dt(data.status.get("started_at"))
         reference = success or started
         stale = reference is not None and now - reference >= STALE_AFTER
         self._issue(
@@ -251,7 +257,7 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
             error=(str(error.get("message")) if error_is_current else "") or "no error recorded",
         )
 
-    async def _import_usage(self) -> int:
+    async def _import_usage(self, status: dict[str, Any]) -> int:
         key = self.config_entry.data[CONF_STATISTIC_KEY]
         consumption_id, cost_id = statistic_ids(key)
         recorder = get_instance(self.hass)
@@ -268,33 +274,53 @@ class CollectorCoordinator(DataUpdateCoordinator[CollectorData]):
         last_start, last_sum = await last(consumption_id)
         last_cost_start, last_cost_sum = await last(cost_id)
         now = dt_util.utcnow()
-        backfill = last_start is None
-        import_cost = True
-        if backfill:
-            fetch_from = None
-        elif last_cost_start is not None:
-            fetch_from = min(last_start, last_cost_start) + timedelta(hours=1)
-        elif self._last_full_fetch is None or now - self._last_full_fetch >= FULL_FETCH_EVERY:
-            fetch_from = None  # no cost rows yet: look for priced hours across the archive
-        else:
-            # Cost statistic still empty (Opower hasn't priced anything): fetch only new
-            # hours, and leave cost to the daily full fetch so it can backfill from the start.
-            fetch_from = last_start + timedelta(hours=1)
-            import_cost = False
-        body = await self.client.usage(fetch_from)
-        if fetch_from is None:
-            # Only once it succeeded: a timed-out full fetch must not hold off the cost
-            # backfill for another day.
-            self._last_full_fetch = now
+        archive_hours = (status.get("archive") or {}).get("hourly_records")
+        stored = (last_start, last_sum, last_cost_start, last_cost_sum)
 
-        # Any full fetch includes the daily-only older days: consumption already has them
-        # (it only takes rows after its last one), but a late cost backfill needs them.
-        points = usage_points(body, backfill=fetch_from is None)
-        consumption, cost = build_statistics(
-            points, last_start, last_sum, last_cost_start, last_cost_sum, now
+        async def fetch(rebuild: bool) -> tuple[list[StatisticData], list[StatisticData]]:
+            """
+            A rebuild re-imports the whole archive: importing overwrites rows by start, so
+            every sum is recomputed, and a daily-only day's midnight row is replaced by its
+            00:00 hourly row once hourly data exists. Otherwise only hours after the last
+            stored row are fetched.
+            """
+            first, first_sum, first_cost, first_cost_sum = (None, 0.0, None, 0.0) if rebuild else stored
+            import_cost = True
+            if rebuild:
+                fetch_from = None
+            elif first_cost is not None:
+                fetch_from = min(first, first_cost) + timedelta(hours=1)
+            else:
+                # Cost still empty (Opower hasn't priced anything): new hours only, and
+                # cost is left to the daily rebuild so it can backfill from the start.
+                fetch_from = first + timedelta(hours=1)
+                import_cost = False
+            body = await self.client.usage(fetch_from)
+            if rebuild:
+                # Only once it succeeded: a timed-out full fetch is retried next poll.
+                self._last_full_fetch = now
+            consumption, cost = build_statistics(
+                usage_points(body, backfill=rebuild), first, first_sum, first_cost, first_cost_sum, now
+            )
+            return consumption, (cost if import_cost else [])
+
+        cost_due = last_cost_start is None and (
+            self._last_full_fetch is None or now - self._last_full_fetch >= FULL_FETCH_EVERY
         )
-        if not import_cost:
-            cost = []
+        rebuild = last_start is None or self._known_hours is None or cost_due
+        consumption, cost = await fetch(rebuild)
+        if not rebuild and archive_hours is not None and self._known_hours + len(consumption) != archive_hours:
+            # The archive holds hours we never saw (the collector's first-run backfill
+            # landed after our first import, or it filled a gap): rebuild the series.
+            _LOGGER.debug("Collector archive has %s hours, %s imported: rebuilding", archive_hours, self._known_hours)
+            rebuild = True
+            consumption, cost = await fetch(True)
+        if rebuild:
+            # The archive's own count, not the response's: a record the API skips must not
+            # make every later poll look like a mismatch.
+            self._known_hours = archive_hours if archive_hours is not None else len(consumption)
+        else:
+            self._known_hours += len(consumption)
         name = self.config_entry.title
         if consumption:
             async_add_external_statistics(

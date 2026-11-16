@@ -113,6 +113,11 @@ SOURCE_PTC = "Price to Compare"
 DEFAULT_SERVICE_HINTS = ("default service", "duquesne light default")
 
 
+def has_value(state: Any) -> bool:
+    """Whether an entity state is usable as an input (it exists and isn't unavailable/unknown)."""
+    return state is not None and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+
+
 @dataclass
 class Market:
     offers: list[Rate]
@@ -339,7 +344,7 @@ class EnergyShopperCoordinator(DataUpdateCoordinator[ShopperData]):
         if not entity_id:
             return None, None
         state = self.hass.states.get(entity_id)
-        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+        if not has_value(state):
             self._missing.append(entity_id)
             return None, None
         return state.state, state.attributes.get("unit_of_measurement")
@@ -349,10 +354,6 @@ class EnergyShopperCoordinator(DataUpdateCoordinator[ShopperData]):
     def _input_entities(self) -> list[str]:
         keys = (CONF_RATE_ENTITY, CONF_SUPPLIER_ENTITY, CONF_PTC_ENTITY)
         return [entity_id for key in keys if (entity_id := self._opt(key))]
-
-    def _has_value(self, entity_id: str) -> bool:
-        state = self.hass.states.get(entity_id)
-        return state is not None and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
 
     @callback
     def async_watch_inputs(self) -> CALLBACK_TYPE:
@@ -390,7 +391,7 @@ class EnergyShopperCoordinator(DataUpdateCoordinator[ShopperData]):
         data = self.data
         if data is None or not data.missing_inputs:
             return
-        if all(self._has_value(entity_id) for entity_id in data.missing_inputs):
+        if all(has_value(self.hass.states.get(entity_id)) for entity_id in data.missing_inputs):
             self.config_entry.async_create_background_task(
                 self.hass, self.async_request_refresh(), f"{DOMAIN} input back"
             )
@@ -719,24 +720,33 @@ class EnergyShopperCoordinator(DataUpdateCoordinator[ShopperData]):
                     "phone": rec.phone or "see the listing",
                 },
             )
+        registry = ir.async_get(self.hass)
         for issue_id in self._our_issues(kind):
-            if issue_id != keep:
-                ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            if issue_id == keep:
+                continue
+            issue = registry.async_get_issue(DOMAIN, issue_id)
+            if issue is not None and issue.dismissed_version is not None:
+                # Deleting would drop the dismissal, and the issue would come back the
+                # next time this supplier is recommended. An ignored issue stays hidden.
+                continue
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
 
     def _track_rate(self, shopper: ShopperData) -> None:
         """Raise an issue when your own rate (sensor or typed) rises by RATE_JUMP_PCT."""
         if shopper.baseline_source not in (SOURCE_ENTITY, SOURCE_VALUE) or not shopper.baseline_price:
             return
         history: list[dict[str, Any]] = self._state.setdefault("rate_history", [])
-        price, unit = round(shopper.baseline_price, 6), shopper.unit
+        price, unit, supplier = round(shopper.baseline_price, 6), shopper.unit, shopper.current_supplier
         last = history[-1] if history else None
-        if last and last["unit"] == unit and abs(last["price"] - price) < 1e-6:
+        if last and last["unit"] == unit and last.get("supplier") == supplier and abs(last["price"] - price) < 1e-6:
             return
         today = dt_util.now().date().isoformat()
-        history.append({"price": price, "unit": unit, "date": today})
+        history.append({"price": price, "unit": unit, "supplier": supplier, "date": today})
         del history[:-RATE_HISTORY_CAP]
         if not last or last["unit"] != unit or last["price"] <= 0:
             return
+        if last.get("supplier") != supplier:
+            return  # a new supplier is a switch you made, not your rate resetting
         pct = 100.0 * (price - last["price"]) / last["price"]
         if pct < float(self._opt(CONF_RATE_JUMP_PCT, DEFAULT_RATE_JUMP_PCT)):
             return

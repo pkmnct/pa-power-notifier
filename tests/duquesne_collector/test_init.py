@@ -270,3 +270,49 @@ async def test_failed_full_fetch_is_retried_next_poll(
     starts_before = list(collector.usage_starts)
     await _poll(hass, config_entry)
     assert collector.usage_starts[len(starts_before):] == ["2000-01-01"]  # tried again, not skipped for a day
+
+
+async def test_collector_backfill_after_first_import_is_rebuilt(
+    hass: HomeAssistant, collector: FakeCollector, config_entry
+) -> None:
+    """The integration is added while the collector's first run is still filling the archive."""
+    full_hourly, full_daily = collector.hourly, collector.daily
+    collector.hourly, collector.daily = full_hourly[-6:], []  # only the newest hours so far
+    await _setup(hass, config_entry)
+    assert len((await _stats(hass))[CONSUMPTION_ID]) == 6
+
+    collector.hourly, collector.daily = full_hourly, full_daily  # the run finishes its backfill
+    await _poll(hass, config_entry)
+    cons = (await _stats(hass))[CONSUMPTION_ID]
+    assert len(cons) == DAILY_ONLY + HOURS
+    assert cons[-1]["sum"] == pytest.approx(DAILY_ONLY * 30.0 + HOURS * KWH)
+    sums = [r["sum"] for r in cons]
+    assert sums == sorted(sums)  # one consistent running total
+
+
+async def test_gap_filled_later_is_imported(hass: HomeAssistant, collector: FakeCollector, config_entry) -> None:
+    missing = collector.hourly.pop(10)
+    await _setup(hass, config_entry)
+    assert len((await _stats(hass))[CONSUMPTION_ID]) == DAILY_ONLY + HOURS - 1
+    collector.hourly.insert(10, missing)  # Opower served the hour on a later run
+    await _poll(hass, config_entry)
+    cons = (await _stats(hass))[CONSUMPTION_ID]
+    assert len(cons) == DAILY_ONLY + HOURS
+    assert cons[-1]["sum"] == pytest.approx(DAILY_ONLY * 30.0 + HOURS * KWH)
+
+
+async def test_new_hours_alone_dont_rebuild(hass: HomeAssistant, collector: FakeCollector, config_entry) -> None:
+    await _setup(hass, config_entry)
+    collector.add_hours(2, priced=True)
+    await _poll(hass, config_entry)
+    assert collector.usage_starts[0] == "2000-01-01"
+    assert all(s.endswith("Z") for s in collector.usage_starts[1:])
+
+
+async def test_never_succeeded_is_stale_across_restarts(
+    hass: HomeAssistant, collector: FakeCollector, config_entry
+) -> None:
+    collector.last_success = None
+    collector.first_started = dt_util.now() - timedelta(days=3)  # started_at is recent: restarted
+    await _setup(hass, config_entry)
+    assert issues(hass) == ["collector_stale"]

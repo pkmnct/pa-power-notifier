@@ -249,6 +249,11 @@ class Collector:
         self.running = False
         self.next_run: Optional[datetime] = None
         self.started_at = _now()
+        # Kept across restarts, so a collector that has never succeeded can't look fresh
+        # just because it was restarted.
+        if not self.state.get("first_started_at"):
+            self.state["first_started_at"] = _iso(self.started_at)
+            self._save_state()
         self._lock = threading.Lock()
 
     def _save_state(self) -> None:
@@ -264,6 +269,7 @@ class Collector:
             "service": "duquesne-collector",
             "version": VERSION,
             "started_at": _iso(self.started_at),
+            "first_started_at": self.state.get("first_started_at"),
             "running": self.running,
             "next_run": _iso(self.next_run),
             "last_success": self.state.get("last_success"),

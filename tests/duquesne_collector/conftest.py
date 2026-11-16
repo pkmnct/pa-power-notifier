@@ -49,6 +49,7 @@ class FakeCollector:
             for n in range(DAILY_ONLY, 0, -1)
         ]
         self.last_success = dt_util.now() - timedelta(hours=2)
+        self.first_started: datetime | None = None
         self.last_error: dict | None = None
         self.reject_auth = False
         self.down = False
@@ -75,7 +76,8 @@ class FakeCollector:
         return {
             "service": "duquesne-collector",
             "version": "0.1.0",
-            "started_at": _iso(dt_util.now() - timedelta(days=5)),
+            "started_at": _iso(dt_util.now() - (timedelta(hours=1) if self.first_started else timedelta(days=5))),
+            "first_started_at": _iso(self.first_started) if self.first_started else None,
             "running": False,
             "next_run": _iso(dt_util.now() + timedelta(hours=10)),
             "last_success": _iso(self.last_success) if self.last_success else None,

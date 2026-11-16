@@ -436,3 +436,25 @@ async def test_input_value_during_platform_setup_is_not_missed(
         await _setup(hass, entry)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert state(hass, "gas_recommendation").state == "switch"
+
+
+async def test_dismissal_survives_recommendation_alternating(
+    hass: HomeAssistant, market: FakeMarket, config_entry
+) -> None:
+    await add_usage(hass)
+    await _setup(hass, config_entry)
+    welcome = f"cheaper_gas_supplier_{config_entry.entry_id}_welcome_gas"
+    assert issues(hass, "cheaper_gas_supplier") == [welcome]
+    ir.async_ignore_issue(hass, DOMAIN, welcome, True)
+
+    offers = list(market.offers)
+    market.offers = [o for o in offers if o.supplier != "Welcome Gas"]  # B (Fee Gas) is cheapest now
+    await _poll(hass, config_entry)
+    fee = f"cheaper_gas_supplier_{config_entry.entry_id}_fee_gas"
+    assert issues(hass, "cheaper_gas_supplier") == sorted([fee, welcome])  # dismissed one kept
+
+    market.offers = offers  # back to A
+    await _poll(hass, config_entry)
+    reg = ir.async_get(hass)
+    assert reg.async_get_issue(DOMAIN, welcome).dismissed_version is not None  # still silenced
+    assert reg.async_get_issue(DOMAIN, fee) is None  # the undismissed one went away

@@ -251,3 +251,20 @@ async def test_empty_listing_raises_no_tou_issue(
     await _setup(hass, entry)
     assert state(hass, "electric_recommendation").state == "unknown"
     assert issues(hass) == []
+
+
+async def test_switching_supplier_is_not_a_rate_jump(
+    hass: HomeAssistant, power_switch: FakePowerSwitch, electric_entry
+) -> None:
+    await add_hourly_usage(hass)
+    set_bill_sensors(hass, supplier="Old Supplier", rate=0.10)
+    await _setup(hass, electric_entry)
+    set_bill_sensors(hass, supplier="Pricier Green LLC", rate=0.13)  # your own switch: +30%
+    await electric_entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert not [k for _, k in issues(hass) if k == "electric_rate_jump"]
+
+    set_bill_sensors(hass, supplier="Pricier Green LLC", rate=0.16)  # same supplier, +23%
+    await electric_entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert [k for _, k in issues(hass) if k == "electric_rate_jump"] == ["electric_rate_jump"]

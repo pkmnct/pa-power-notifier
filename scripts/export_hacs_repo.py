@@ -8,8 +8,8 @@ the publishable tree:
 
     python3 scripts/export_hacs_repo.py energy_shopper /tmp/ha-energy-shopper
 
-The output holds custom_components/<domain>/ (with its vendored core, refreshed and
-checked first), hacs.json, README.md, LICENSE, a validation workflow (hassfest + HACS)
+The output holds custom_components/<domain>/ (with its vendored core, which must match
+energy_shopper_core: the export stops if it has drifted), hacs.json, README.md, LICENSE, a validation workflow (hassfest + HACS)
 and, for energy_shopper, the notify blueprint. It never pushes anything: commit and push
 the output yourself, then tag a release (HACS wants at least one).
 """
@@ -19,11 +19,12 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+import vendor_core  # noqa: E402  (scripts/vendor_core.py: what each integration vendors)
 SOURCE_REPO = "https://github.com/pkmnct/pa-power-notifier"
 MIN_HA = "2026.2.0"  # the version the offline tests run against
 
@@ -124,10 +125,23 @@ def main() -> int:
         print(f"{out} is not empty (a .git folder is fine)", file=sys.stderr)
         return 1
 
-    # The vendored core must match energy_shopper_core before it ships.
-    subprocess.run([sys.executable, str(ROOT / "scripts" / "vendor_core.py")], check=True, stdout=subprocess.DEVNULL)
-
     domain, info = args.domain, INTEGRATIONS[args.domain]
+    # Ship exactly what's committed and tested here: a vendored copy that drifted from
+    # energy_shopper_core is an error to fix in this repo, not something to patch quietly.
+    drifted = [
+        str(copy.relative_to(ROOT))
+        for src, copy in vendor_core.vendored_pairs()
+        if copy.is_relative_to(ROOT / "custom_components" / domain)
+        and (not copy.exists() or copy.read_bytes() != src.read_bytes())
+    ]
+    if drifted:
+        print(
+            "Vendored core is out of date: " + ", ".join(drifted)
+            + "\nRun python3 scripts/vendor_core.py, test and commit, then export again.",
+            file=sys.stderr,
+        )
+        return 1
+
     src = ROOT / "custom_components" / domain
     manifest = json.loads((src / "manifest.json").read_text())
     ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
