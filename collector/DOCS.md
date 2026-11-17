@@ -27,7 +27,7 @@ Home Assistant itself can do neither.
 |---|---|---|
 | `username`, `password` | | duquesnelight.com login |
 | `run_at` | `04:30` | Local time(s) of the daily fetch, `HH:MM` or `HH:MM,HH:MM` |
-| `api_token` | generated | The API token clients must send (`Authorization: Bearer <token>`). Set your own and enter the same value in the Duquesne Light (collector) integration. Empty: one is generated and kept inside the add-on (never logged), which keeps the API closed but can't be read from Home Assistant. `none` turns authentication off |
+| `api_token` | required | The API token clients must send (`Authorization: Bearer <token>`): a long random value of your choosing, entered again in the Duquesne Light (collector) integration. The add-on won't start without it. `none` turns authentication off |
 | `download_bills` | on | Download new bill PDFs (where the supplier and supply rate come from) |
 | `hourly_lookback_days` | `400` | How far back hourly usage is paged on each run |
 | `log_level` | `info` | |

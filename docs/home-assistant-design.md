@@ -252,10 +252,12 @@ integration that consumes it, `custom_components/duquesne_collector/` (see below
   usage, newest bill plus any not yet archived, into the existing merge-only archive)
   and a read-only stdlib `http.server` API: `GET /usage?start=&end=`, `/bills`,
   `/status`, `/health`. Shapes are in `collector/README.md`.
-- Bearer token on by default: with no `api_token` / `COLLECTOR_API_TOKEN`, one is
-  generated on first start and saved as `collector_api_token` (mode 0600) in the data
-  folder, never logged (logs get shared); Compose users read it from the host, add-on
-  users set their own. `none` turns authentication off. Usage and bills say a lot
+- Bearer token on by default. The add-on requires `api_token` (its schema has no
+  default, and the entrypoint refuses an empty one): its data folder can't be read from
+  Home Assistant, so a generated token could never be entered in the integration. Under
+  Compose, with no `COLLECTOR_API_TOKEN`, one is generated on first start and saved as
+  `collector_api_token` (mode 0600) in the data folder, never logged (logs get shared),
+  for the user to read from the host. `none` turns authentication off. Usage and bills say a lot
   about a household, so the API isn't open to the network by default.
 - A run counts as a success only if hourly usage came back: when the hourly fetch
   returns nothing after requests failed, or after the archive had hourly data, the run

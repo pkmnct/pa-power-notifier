@@ -851,12 +851,12 @@ class RateChecker:
         self._last_egs_bill = None
         self._last_electric_analysis = None
         self._last_gas_analysis = None
-        from recommendation_engine import report_refused_saves
-        from usage_archive import take_refused_saves
+        from recommendation_engine import report_failed_saves
+        from usage_archive import take_failed_saves
 
-        take_refused_saves()  # only this run's
+        take_failed_saves()  # only this run's
         report = build_check_report(self)
-        report_refused_saves(report)
+        report_failed_saves(report)
         text = report.format_text()
         print("\n" + "=" * 72)
         print(text)

@@ -28,7 +28,7 @@ Options:
 |---|---|---|
 | `username`, `password` | — | duquesnelight.com login |
 | `run_at` | `04:30` | Local time(s) of the daily fetch, `HH:MM[,HH:MM]` |
-| `api_token` | generated | Clients must send `Authorization: Bearer <token>`. Empty: generated on first start and saved as `collector_api_token` in the data folder (never logged). `none` turns authentication off |
+| `api_token` | required | Clients must send `Authorization: Bearer <token>`. The add-on won't start without it (its data folder can't be read from Home Assistant, so a generated token couldn't be entered in the integration). `none` turns authentication off |
 | `download_bills` | `true` | Download new bill PDFs each run (supplier + supply rate) |
 | `hourly_lookback_days` | `400` | How far back to page hourly usage |
 | `log_level` | `info` | |

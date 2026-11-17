@@ -28,7 +28,9 @@ schema:
   username: str
   password: password
   run_at: match(^([01][0-9]|2[0-3]):[0-5][0-9](,([01][0-9]|2[0-3]):[0-5][0-9])*$)
-  api_token: password?
+  # Required: the add-on's own data folder can't be read from Home Assistant, so a
+  # generated token couldn't be entered in the integration. "none" turns auth off.
+  api_token: password
   download_bills: bool
   hourly_lookback_days: int(29,800)
   log_level: list(debug|info|warning|error)

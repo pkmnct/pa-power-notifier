@@ -397,24 +397,19 @@ def _filters_list(checker: Any) -> List[str]:
     return out
 
 
-def report_refused_saves(report: CheckReport) -> None:
+def report_failed_saves(report: CheckReport) -> None:
     """
-    An archive file that couldn't be read is never saved over, so nothing new reaches it.
-    Say so in the report, as an error (so it's emailed), not only in the log: otherwise
-    the archive stops growing unnoticed while the utilities drop their history.
+    An archive file that couldn't be read is never saved over, and a write can fail (disk
+    full, permissions); either way nothing new reaches it. Say so in the report, as an
+    error (so it's emailed), not only in the log: otherwise the archive stops growing
+    unnoticed while the utilities drop their history.
     """
     try:
-        from usage_archive import take_refused_saves
+        from usage_archive import save_failure_advice, take_failed_saves
     except ImportError:
         return
-    for path in take_refused_saves():
-        report.add_warning(
-            "error",
-            "archive",
-            f"Couldn't save {path}: it couldn't be read, so it isn't saved over and nothing "
-            "new was archived to it. Repair or restore it from a backup; moving it aside "
-            "starts it again from what the utilities still have.",
-        )
+    for path, cause in take_failed_saves():
+        report.add_warning("error", "archive", save_failure_advice(path, cause))
 
 
 def _collect_hourly(checker: Any, report: CheckReport) -> List:

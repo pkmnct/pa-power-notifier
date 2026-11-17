@@ -82,10 +82,10 @@ class ArchiveTests(unittest.TestCase):
     def test_notifier_report_says_when_a_save_was_refused(self):
         """A notifier-only setup must hear about it: an error in the report, so it's emailed."""
         from energy_shopper_core.report import CheckReport
-        from recommendation_engine import report_refused_saves
-        from usage_archive import take_refused_saves
+        from recommendation_engine import report_failed_saves
+        from usage_archive import take_failed_saves
 
-        take_refused_saves()  # start clean
+        take_failed_saves()  # start clean
         hourly = self._half_written("hourly_usage.json")
         store = HourlyUsageStore(hourly)
         store.merge([HourlyUsageRecord(dt="2026-11-02T00:00:00-05:00", kwh=1.0, cost=0.0)])
@@ -100,7 +100,7 @@ class ArchiveTests(unittest.TestCase):
 
         report = CheckReport()
         with self.assertLogs(level="ERROR"):
-            report_refused_saves(report)
+            report_failed_saves(report)
         errors = [w for w in report.warnings if w.level == "error" and w.source == "archive"]
         self.assertEqual(len(errors), 2)
         self.assertIn(hourly, errors[1].message + errors[0].message)
@@ -108,8 +108,34 @@ class ArchiveTests(unittest.TestCase):
         self.assertTrue(report.should_email())
 
         later = CheckReport()
-        report_refused_saves(later)  # the next run starts from nothing
+        report_failed_saves(later)  # the next run starts from nothing
         self.assertEqual(later.warnings, [])
+
+    def test_notifier_report_says_when_a_write_failed(self):
+        """A failed write (disk full, permissions) is reported too, with advice that fits it."""
+        from unittest import mock
+
+        import usage_archive
+        from energy_shopper_core.report import CheckReport
+        from recommendation_engine import report_failed_saves
+        from usage_archive import take_failed_saves
+
+        take_failed_saves()
+        path = os.path.join(self.dir, "hourly_usage.json")
+        store = HourlyUsageStore(path)
+        store.merge([HourlyUsageRecord(dt="2026-11-02T00:00:00-05:00", kwh=1.0, cost=0.0)])
+        with mock.patch.object(usage_archive, "write_text_atomic", side_effect=OSError(28, "No space left on device")):
+            with self.assertLogs("usage_archive", level="ERROR"):
+                self.assertIs(store.save(), False)
+        self.assertFalse(store.load_failed)
+        report = CheckReport()
+        report_failed_saves(report)
+        (error,) = [w for w in report.warnings if w.source == "archive"]
+        self.assertEqual(error.level, "error")
+        self.assertIn(path, error.message)
+        self.assertIn("writing it failed", error.message)
+        self.assertNotIn("moving it aside starts", error.message)  # that advice is for unreadable files
+        self.assertIn("don't move the file aside", error.message)
 
     def test_write_is_flushed_to_disk_before_the_rename(self):
         """Otherwise a power cut soon after a save can leave the renamed file empty."""

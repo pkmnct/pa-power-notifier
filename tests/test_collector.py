@@ -223,6 +223,55 @@ class CollectorTests(unittest.TestCase):
         with open(damaged) as f:
             self.assertTrue(f.read().endswith('"kwh": 1.5'))  # left as it was
 
+    def test_run_failure_advice_fits_a_failed_write(self):
+        """A full disk is not a damaged file: don't tell the user to move a healthy archive aside."""
+        from unittest import mock
+
+        import duquesne_light_analyzer as dla
+        import usage_archive
+        from energy_shopper_core.tou import HourlyUsageRecord
+
+        class FakeClient:
+            last_hourly_errors = 0
+
+            def ensure_authenticated(self):
+                pass
+
+            def fetch_hourly_history(self, lookback):
+                return [HourlyUsageRecord(dt="2026-11-02T00:00:00-05:00", kwh=1.0, cost=0.2)]
+
+            def fetch_daily_response(self):
+                return {}
+
+        class FakeAnalyzer:
+            def __init__(self):
+                self.client = FakeClient()
+                self.response_file = os.path.join(os.environ["DATA_DIR"], "duquesne_response.json")
+
+        real_write = usage_archive.write_text_atomic
+
+        def disk_full_for_hourly(path, text):
+            if str(path).endswith("hourly_usage.json"):
+                raise OSError(28, "No space left on device")
+            return real_write(path, text)
+
+        os.environ.update(DATA_DIR=self.tmp.name, COLLECTOR_BILLS="0")
+        original = dla.DuquesneLightAnalyzer
+        dla.DuquesneLightAnalyzer = FakeAnalyzer
+        try:
+            with mock.patch.object(usage_archive, "write_text_atomic", side_effect=disk_full_for_hourly):
+                collector = col.Collector()
+                self.assertFalse(collector.run_once())
+            status = collector.status()
+        finally:
+            dla.DuquesneLightAnalyzer = original
+            os.environ.pop("DATA_DIR", None)
+            os.environ.pop("COLLECTOR_BILLS", None)
+        message = status["last_error"]["message"]
+        self.assertEqual(status["last_error"]["type"], "archive")
+        self.assertIn("writing it failed", message)
+        self.assertNotIn("moving it aside starts", message)
+
     def test_generated_token_is_never_logged(self):
         os.environ["DATA_DIR"] = self.tmp.name
         os.environ.pop("COLLECTOR_API_TOKEN", None)

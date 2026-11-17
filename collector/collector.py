@@ -388,7 +388,14 @@ class Collector:
     def _fetch(self, run: Dict[str, Any]) -> None:
         from duquesne_light_analyzer import DuquesneLightAnalyzer
         from energy_shopper_core.utilities import duquesne as core
-        from usage_archive import BillArchive, DailyElectricUsageStore, HourlyUsageStore
+        from usage_archive import (
+            UNREADABLE,
+            WRITE_FAILED,
+            BillArchive,
+            DailyElectricUsageStore,
+            HourlyUsageStore,
+            save_failure_advice,
+        )
 
         analyzer = DuquesneLightAnalyzer()
         client = analyzer.client
@@ -400,13 +407,13 @@ class Collector:
         # Archive files that weren't saved this run: one that couldn't be read is never
         # saved over, so the run must fail loudly rather than look like a success while
         # nothing is archived and the utility drops the history day by day.
-        unsaved: List[str] = []
+        unsaved: List[Tuple[str, str]] = []  # (path, cause), as usage_archive names causes
         with DATA_LOCK:
             store = HourlyUsageStore(hourly_path())
             had_hours = len(store) > 0
             run["hourly_added"] = store.merge(hourly)
             if not store.save():
-                unsaved.append(store.path)
+                unsaved.append((store.path, UNREADABLE if store.load_failed else WRITE_FAILED))
         run["hourly_fetched"] = len(hourly)
         run["hourly_errors"] = client.last_hourly_errors
         # Nothing back, after requests failed or after we'd had hourly data before: the
@@ -426,7 +433,7 @@ class Collector:
             daily = DailyElectricUsageStore(daily_path())
             run["daily_added"] = daily.merge(rows)
             if not daily.save():
-                unsaved.append(daily.path)
+                unsaved.append((daily.path, UNREADABLE if daily.load_failed else WRITE_FAILED))
         run["daily_fetched"] = len(rows)
 
         if _truthy(os.getenv("COLLECTOR_BILLS"), True):
@@ -436,18 +443,16 @@ class Collector:
             bill_archive = BillArchive(bills_dir())
             run["bills_added"] = analyzer.backfill_bill_archive(bill_archive)
             if bill_archive.load_failed:
-                unsaved.append(str(bill_archive.index_path))
+                unsaved.append((str(bill_archive.index_path), UNREADABLE))
             if egs is None:
                 run["warnings"].append(
                     "Latest bill: no EGS supply rate (download failed, or the bill is on default service)"
                 )
         logger.info("Collector run finished: %s", {k: v for k, v in run.items() if k != "warnings"})
         if unsaved:
-            raise ArchiveWriteError(
-                "Couldn't save " + ", ".join(unsaved) + ": a file that couldn't be read is never saved "
-                "over, so nothing new was archived to it. Repair or restore it from a backup; "
-                "moving it aside starts it again from what the utility still has."
-            )
+            # The advice depends on the cause: moving a file aside is right for one that
+            # can't be read, and throws a healthy archive away when only the write failed.
+            raise ArchiveWriteError(" ".join(save_failure_advice(path, cause) for path, cause in unsaved))
         if hourly_failed:
             raise HourlyFetchError(
                 "Hourly usage fetch returned nothing"

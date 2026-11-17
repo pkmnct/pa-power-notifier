@@ -22,7 +22,7 @@ import shutil
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -114,21 +114,47 @@ def write_json_atomic(path: Any, data: Any) -> None:
 
 REFUSED_SAVE = "Not saving %s: it couldn't be read when loaded, and saving would replace the history in it"
 
-# Files whose save was refused since take_refused_saves() last ran, so a caller that
-# saves in many places (the notifier) can report them once, without checking each save.
-_refused_saves: set = set()
+# Why a save didn't happen. The remedies differ: an unreadable file needs repairing or
+# restoring; a failed write (disk full, permissions, a read-only mount) needs the disk
+# fixed, and the file itself is fine: moving it aside would throw its history away.
+UNREADABLE = "unreadable"
+WRITE_FAILED = "write failed"
+
+# Files whose save was refused or failed since take_failed_saves() last ran, so a caller
+# that saves in many places (the notifier) can report them once, without checking each save.
+_failed_saves: Dict[str, str] = {}
 
 
 def _refuse_save(path: Any) -> None:
     logger.error(REFUSED_SAVE, path)
-    _refused_saves.add(str(path))
+    _failed_saves[str(path)] = UNREADABLE
 
 
-def take_refused_saves() -> List[str]:
-    """Files whose save was refused (unreadable on load) since the last call; clears the list."""
-    paths = sorted(_refused_saves)
-    _refused_saves.clear()
-    return paths
+def _save_failed(path: Any, error: Exception) -> None:
+    logger.error("Could not save %s: %s", path, error)
+    _failed_saves[str(path)] = WRITE_FAILED
+
+
+def take_failed_saves() -> List[Tuple[str, str]]:
+    """(path, UNREADABLE or WRITE_FAILED) for saves that didn't happen since the last call; clears the list."""
+    failed = sorted(_failed_saves.items())
+    _failed_saves.clear()
+    return failed
+
+
+def save_failure_advice(path: str, cause: str) -> str:
+    """What to tell the user about a save that didn't happen, by cause."""
+    if cause == UNREADABLE:
+        return (
+            f"Couldn't save {path}: it couldn't be read, so it isn't saved over and nothing new "
+            "was archived to it. Repair or restore it from a backup; moving it aside starts it "
+            "again from what the utilities still have."
+        )
+    return (
+        f"Couldn't save {path}: writing it failed (disk full, permissions, or a read-only "
+        "mount?), so nothing new was archived to it. The file itself is intact: fix the disk "
+        "or permissions, and don't move the file aside, or its history goes with it."
+    )
 
 
 class DailyElectricUsageStore:
@@ -231,7 +257,7 @@ class DailyElectricUsageStore:
             logger.info("Saved %d daily electric records to %s", len(self._records), self.path)
             return True
         except Exception as e:
-            logger.error("Could not save daily usage store: %s", e)
+            _save_failed(self.path, e)
             return False
 
     def all_records(self) -> List[DailyUsageRecord]:
@@ -346,7 +372,7 @@ class GasUsageStore:
             logger.info("Saved %d gas usage cycles to %s", len(rows), self.path)
             return True
         except Exception as e:
-            logger.error("Could not save gas usage store: %s", e)
+            _save_failed(self.path, e)
             return False
 
     def all_records_as_gas_usage_data(self) -> List[Any]:
@@ -699,7 +725,7 @@ class HourlyUsageStore:
             logger.info("Saved %d hourly records to %s", len(self._records), self.path)
             return True
         except Exception as e:
-            logger.error("Could not save hourly usage store: %s", e)
+            _save_failed(self.path, e)
             return False
 
     def all_records(self) -> List[HourlyUsageRecord]:

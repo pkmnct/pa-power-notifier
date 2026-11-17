@@ -9,6 +9,14 @@ set -eu
 
 OPTIONS=/data/options.json
 if [ -f "$OPTIONS" ]; then
+    # As an add-on, the token must be set (the schema requires it; this catches an empty
+    # value): a generated one would live in /data, which Home Assistant can't read, so the
+    # integration could never connect. "none" turns authentication off.
+    if ! python3 -c 'import json,sys; sys.exit(0 if str(json.load(open(sys.argv[1])).get("api_token") or "").strip() else 1)' "$OPTIONS"; then
+        echo "Set api_token in the add-on's Configuration tab (a long random value; enter the same" >&2
+        echo "value in the Duquesne Light (collector) integration), or \"none\" to turn authentication off." >&2
+        exit 1
+    fi
     # Python, not jq (the image has no jq). Secrets go straight into the environment;
     # nothing is printed.
     eval "$(python3 - "$OPTIONS" <<'PY'

@@ -52,9 +52,10 @@ the results on your network. The integration only talks to the collector.
 
 **2. Add the integration** **Duquesne Light (collector)**: URL `http://localhost:8765` for
 the add-on (or `http://HOST:8765` for a Compose collector on another machine), plus the
-API token you set with the add-on's `api_token` option (`COLLECTOR_API_TOKEN` under
-Compose). Left empty, the collector generates one and never logs it: under Compose it's in
-`data/collector_api_token` on the host; the add-on's copy can't be read, so set your own.
+API token you set with the add-on's `api_token` option, which is required (the add-on
+won't start without it). Under Compose, `COLLECTOR_API_TOKEN` sets it; left empty there,
+the collector generates one, never logs it, and saves it as `data/collector_api_token` on
+the host.
 Reconfigure later keeps your history if the address changes.
 
 What you get:
