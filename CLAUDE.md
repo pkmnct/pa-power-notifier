@@ -39,7 +39,8 @@ single integration folder gives a false "Domain does not match dir name".
 
 Prove it: stash the source change (`git stash push <source files>`), run the new test, see it
 fail, `git stash pop`. Twice in this repo a "regression test" passed on the old code too: the
-old code never reached the buggy path. If a test can't fail on the old code, say so.
+old code never reached the buggy path. If a test can't fail on the old code, say so, and
+don't write "fails on the previous code" in a commit message unless you ran it.
 
 ### Refactors must not change the CLI's output
 
@@ -71,6 +72,20 @@ Run it from the repo root with the change in the working tree (`git archive HEAD
 "before"). PA Power/Gas Switch offers are fetched live by both runs, so run them back to back.
 
 ## Invariants
+
+### All three integrations
+
+- Statistic ids, Store keys and repair-issue ids come from config entry data captured at
+  setup (`unique_id`, `statistic_key`), never from a lookup made on each poll. Peoples Gas's
+  account number falls back to the username when the portal hides it; ids built from it
+  started a second statistics series. Reauth mustn't switch an entry to an account it can't
+  verify (no account number: keep the username).
+- Rejected credentials or tokens raise `ConfigEntryAuthFailed` (reauth), never
+  `UpdateFailed`, and don't count toward "unreachable".
+- An optional expensive read (the collector's whole archive) that fails falls back to what
+  it can get: the update still succeeds and the sensors stay up.
+- Anything decided from another integration's entities at setup must be re-checked once they
+  load: those entities often have no state on the first refresh after a restart.
 
 ### Vendored core
 
@@ -110,6 +125,10 @@ This took many review rounds; read the `merge_rebuild` and `_import_usage` docst
   (`.astimezone()` on a naive local time, or `zoneinfo`), never a fixed UTC offset.
 - Test the reinstall cases: archive behind HA, archive smaller than HA's history, archive
   holding only daily totals where HA has hours. They're where every bug was.
+- `tests/duquesne_collector/test_merge_rebuild.py` runs `merge_rebuild` over every
+  combination of what HA and the archive hold for a day. A new failure there is a combination
+  your change affects: fix the code, or, for a deliberate trade-off, add it to `KNOWN` with
+  the reason. Add a shape when you find one it doesn't cover, rather than one more case.
 
 ### Energy Shopper (`custom_components/energy_shopper/`)
 
@@ -120,6 +139,11 @@ This took many review rounds; read the `merge_rebuild` and `_import_usage` docst
 - Never delete a repair issue the user dismissed: deleting drops the dismissal.
 - Gas and electric share code paths; an existing gas entry (no `fuel` in its data) must keep
   its entity and issue ids.
+- Input sensors often have no value on the first refresh after a restart (their integration
+  loads later). A refresh held for a missing input reruns as soon as they all have values:
+  the state listener, plus a check right after subscribing (a value can arrive before the
+  listener exists). The "input sensor is missing" repair is judged only once HA is running
+  (`async_at_started`). Each of these gaps was a bug.
 
 ## HA test pitfalls
 
@@ -129,8 +153,20 @@ This took many review rounds; read the `merge_rebuild` and `_import_usage` docst
   teardown closes the recorder's database under a statistics import: a segfault, often only
   on CI's slower runners.
 - `strings.json` and `translations/en.json` must stay identical; hassfest rejects
-  `<...>` in strings (write `HOST`, not `<host>`).
+  `<...>` in strings (write `HOST`, not `<host>`). Edit them as text: re-dumping with
+  `json.dumps` reformats the compact entries.
+- Tests must not depend on the date. The harness sets HA's time zone to `US/Pacific`, and
+  fixtures built from `dt_util.now()` shift with the weekday and month: an assertion near a
+  threshold passes one day and fails the next (the Time-of-Use share sat at 50%). Freeze
+  time with the `freezer` fixture, or assert a bound the fixture always meets.
 - `NumberSelector` needs `step >= 0.001` or `"any"`, and no `max=None`.
+
+## Reviewing
+
+- Confirm each finding at the exact lines before reporting it. Read one file per command:
+  a review here reported a bug from two outputs run together, and missed an autouse fixture
+  that patched setup for the whole test module.
+- Say whether a finding was reproduced or found by reading the code.
 
 ## Safety
 
@@ -145,4 +181,6 @@ This took many review rounds; read the `merge_rebuild` and `_import_usage` docst
 - Don't build or run code downloaded for checking (linters, actions); validate against their
   schemas as data instead.
 - Several sessions may work on the same branch: `git fetch` before starting and before
-  pushing, and look at commits others pushed before building on them.
+  pushing, and look at commits others pushed before building on them or reviewing. They may
+  also share this checkout: commit only the files you changed (`git add <paths>`, never
+  `-A`), and leave others' uncommitted edits alone.
