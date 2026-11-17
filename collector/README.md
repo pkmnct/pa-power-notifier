@@ -28,7 +28,7 @@ Options:
 |---|---|---|
 | `username`, `password` | — | duquesnelight.com login |
 | `run_at` | `04:30` | Local time(s) of the daily fetch, `HH:MM[,HH:MM]` |
-| `api_token` | generated | Clients must send `Authorization: Bearer <token>`. Empty: generated on first start, logged once and saved as `collector_api_token` in the data folder. `none` turns authentication off |
+| `api_token` | generated | Clients must send `Authorization: Bearer <token>`. Empty: generated on first start and saved as `collector_api_token` in the data folder (never logged). `none` turns authentication off |
 | `download_bills` | `true` | Download new bill PDFs each run (supplier + supply rate) |
 | `hourly_lookback_days` | `400` | How far back to page hourly usage |
 | `log_level` | `info` | |
@@ -69,8 +69,11 @@ over the existing archive and never fetches.
 Every response is JSON. Every route except `/health` needs `Authorization: Bearer <token>`
 (`401` without it), unless the token is set to `none`. Other methods get `405`. Your usage
 and bills say a lot about a household, so the API isn't open by default: with no token
-configured, one is generated on first start, logged once ("Generated an API token"), and
-saved as `collector_api_token` in the data folder.
+configured, one is generated on first start and saved as `collector_api_token` (mode 0600)
+in the data folder; it's never logged, since logs get shared. Under Docker Compose, read it
+from `data/collector_api_token` on the host. The add-on's data folder isn't reachable from
+Home Assistant, so for the add-on set your own `api_token` and enter the same value in the
+integration.
 
 ### `GET /usage?start=&end=`
 

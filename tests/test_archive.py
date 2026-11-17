@@ -67,6 +67,41 @@ class ArchiveTests(unittest.TestCase):
         with open(index) as f:
             self.assertEqual(f.read(), HALF_WRITTEN)
 
+    def test_refused_save_says_so(self):
+        path = self._half_written("hourly_usage.json")
+        store = HourlyUsageStore(path)
+        self.assertTrue(store.load_failed)
+        store.merge([HourlyUsageRecord(dt="2026-11-02T00:00:00-05:00", kwh=1.0, cost=0.0)])
+        with self.assertLogs("usage_archive", level="ERROR") as logs:
+            self.assertIs(store.save(), False)  # a caller can tell nothing was archived
+        self.assertIn("Not saving", "\n".join(logs.output))
+        fine = HourlyUsageStore(os.path.join(self.dir, "other.json"))
+        fine.merge([HourlyUsageRecord(dt="2026-11-02T00:00:00-05:00", kwh=1.0, cost=0.0)])
+        self.assertIs(fine.save(), True)
+
+    def test_write_is_flushed_to_disk_before_the_rename(self):
+        """Otherwise a power cut soon after a save can leave the renamed file empty."""
+        import usage_archive
+
+        events = []
+        real_fsync, real_replace = os.fsync, os.replace
+
+        def fsync(fd):
+            events.append("fsync")
+            return real_fsync(fd)
+
+        def replace(src, dst):
+            events.append("replace")
+            return real_replace(src, dst)
+
+        usage_archive.os.fsync, usage_archive.os.replace = fsync, replace
+        try:
+            write_json_atomic(os.path.join(self.dir, "x.json"), {"a": 1})
+        finally:
+            usage_archive.os.fsync, usage_archive.os.replace = real_fsync, real_replace
+        self.assertEqual(events[:2], ["fsync", "replace"])  # the data, then the rename
+        self.assertIn("fsync", events[2:])  # and the directory, so the rename sticks
+
     def test_readable_store_saves_atomically(self):
         path = os.path.join(self.dir, "sub", "hourly_usage.json")
         store = HourlyUsageStore(path)

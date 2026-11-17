@@ -253,13 +253,16 @@ integration that consumes it, `custom_components/duquesne_collector/` (see below
   and a read-only stdlib `http.server` API: `GET /usage?start=&end=`, `/bills`,
   `/status`, `/health`. Shapes are in `collector/README.md`.
 - Bearer token on by default: with no `api_token` / `COLLECTOR_API_TOKEN`, one is
-  generated on first start, saved as `collector_api_token` (mode 0600) in the data
-  folder and logged once; `none` turns authentication off. Usage and bills say a lot
+  generated on first start and saved as `collector_api_token` (mode 0600) in the data
+  folder, never logged (logs get shared); Compose users read it from the host, add-on
+  users set their own. `none` turns authentication off. Usage and bills say a lot
   about a household, so the API isn't open to the network by default.
 - A run counts as a success only if hourly usage came back: when the hourly fetch
   returns nothing after requests failed, or after the archive had hourly data, the run
   is recorded as failed (`last_error.type` `hourly`), though daily usage and bills are
-  still saved. `/status` also reports `first_started_at`, kept across restarts (an
+  still saved. So is a run that couldn't save an archive file (`archive`): a file that
+  couldn't be read is never saved over, and that mustn't look like a success. Archive
+  writes are flushed to disk before the rename. `/status` also reports `first_started_at`, kept across restarts (an
   upgraded collector that never succeeded gets 1970), and the daily schedule uses the
   local zone's offset for each run's own date, so it doesn't drift an hour across DST.
 - One image: the root `Dockerfile` gained a `collector` target. The default target is
@@ -285,7 +288,7 @@ the real collector serving a copy of the archive.
 | Statistics | External `duquesne_collector:<key>_energy_consumption` (kWh) and `_energy_cost` (USD), polled hourly. The first import takes every archived hour, plus daily totals at local midnight for older days with no hourly data, and the part of the oldest hourly day before its first hour (that day's total less its hours). After that, only hours after each statistic's own last row; cost waits at the first hour Opower hasn't priced, and gives up on hours still unpriced after 7 days |
 | Rebuilds | The archive can gain hours HA never saw (the collector's first-run backfill landing after the integration's first import, gap fills, a reinstalled or replacement collector). The integration keeps a count of imported archive hours and the archive's newest hour, saved per entry; a shortfall against `/status`'s count, or an archive smaller than the count, rebuilds the series from the whole archive. A rebuild never clears statistics: it lays the archive over what HA has, keeping HA's rows before the archive's first day and after its last row and continuing the sums. A midnight row with no 01:00 row beside it is an aggregate (a daily total, or the first day's remainder); individual hours beat an aggregate in both directions, so no hour counts twice. A replacement collector catching up to HA's newest hour doesn't trigger rebuilds, and a failed full read falls back to new hours only |
 | Sensors | From the newest bill: supplier (`Duquesne Light default service` when there's none), supply rate and Price to Compare ($/kWh), bill amount, date, kWh and supply charges. Diagnostics: collector last success (status as attributes) and usage data through |
-| Repair issues | Collector login failing (`last_error.type == "auth"` newer than the last success); no success for 36 h (measured from `first_started_at` when there has never been one, so restarts can't hide it; a failed hourly fetch counts as no success); collector unreachable for 24 h (a rejected token is reauth, not this). Each clears itself on recovery |
+| Repair issues | Collector login failing (`last_error.type == "auth"` newer than the last success); no success for 36 h (measured from `first_started_at` when there has never been one, so restarts can't hide it; a failed hourly fetch or archive save counts as no success); collector unreachable for 24 h (a rejected token is reauth, not this). Each clears itself on recovery |
 
 Live against the archive copy: 10,290 hourly rows (Aug 2025 → Nov 2026, 12,849 kWh), 9,978
 priced (312 old hours Opower never priced are skipped), newest bill's supplier and rates

@@ -142,6 +142,31 @@ def resolve_api_token() -> Tuple[str, str]:
     return token, "generated"
 
 
+def announce_api_token(source: str, host: str = "0.0.0.0", port: int = DEFAULT_PORT) -> None:
+    """
+    Log how the API is protected, never the token itself: logs get pasted into issues,
+    and the token guards a household's usage and bills.
+    """
+    path = data_dir() / TOKEN_FILE
+    auth = {
+        "configured": "bearer token required (the one you set)",
+        "saved": f"bearer token required (generated earlier, saved in {path})",
+        "generated": f"bearer token required (generated now, saved in {path})",
+        "disabled": "no auth: COLLECTOR_API_TOKEN is set to turn it off",
+    }[source]
+    logger.info("Duquesne collector API on %s:%d, %s; data in %s", host, port, auth, data_dir())
+    if source == "generated":
+        logger.warning(
+            "No API token was set, so one was generated and saved in %s (under Docker Compose: "
+            "data/%s on the host). To connect Home Assistant, choose your own token: set "
+            "api_token in the add-on's Configuration tab (COLLECTOR_API_TOKEN for Compose) and "
+            "enter the same value in the Duquesne Light (collector) integration. 'none' turns "
+            "authentication off.",
+            path,
+            TOKEN_FILE,
+        )
+
+
 def _write_json(path: str, data: dict) -> None:
     """Write via a temp file and rename, so readers see the old or the new file, never half."""
     from usage_archive import write_json_atomic
@@ -276,6 +301,10 @@ class HourlyFetchError(RuntimeError):
     """The run fetched daily usage and bills, but no hourly usage came back."""
 
 
+class ArchiveWriteError(RuntimeError):
+    """An archive file couldn't be saved: it couldn't be read (so it isn't saved over), or the write failed."""
+
+
 class Collector:
     def __init__(self):
         self.state = _read_json(status_path())
@@ -338,9 +367,12 @@ class Collector:
                 "auth" if isinstance(e, DuquesneAuthError)
                 else "blocked" if isinstance(e, DuquesneBlockedError)
                 else "hourly" if isinstance(e, HourlyFetchError)
+                else "archive" if isinstance(e, ArchiveWriteError)
                 else type(e).__name__
             )
-            logger.error("Collector run failed (%s): %s", kind, e, exc_info=kind not in ("auth", "blocked", "hourly"))
+            logger.error(
+                "Collector run failed (%s): %s", kind, e, exc_info=kind not in ("auth", "blocked", "hourly", "archive")
+            )
             self.state["last_error"] = {"at": _iso(_now()), "type": kind, "message": str(e)}
         finally:
             run["finished_at"] = _iso(_now())
@@ -365,11 +397,16 @@ class Collector:
 
         lookback = int(os.getenv("HOURLY_LOOKBACK_DAYS") or core.DEFAULT_HOURLY_LOOKBACK_DAYS)
         hourly = client.fetch_hourly_history(lookback)
+        # Archive files that weren't saved this run: one that couldn't be read is never
+        # saved over, so the run must fail loudly rather than look like a success while
+        # nothing is archived and the utility drops the history day by day.
+        unsaved: List[str] = []
         with DATA_LOCK:
             store = HourlyUsageStore(hourly_path())
             had_hours = len(store) > 0
             run["hourly_added"] = store.merge(hourly)
-            store.save()
+            if not store.save():
+                unsaved.append(store.path)
         run["hourly_fetched"] = len(hourly)
         run["hourly_errors"] = client.last_hourly_errors
         # Nothing back, after requests failed or after we'd had hourly data before: the
@@ -388,19 +425,29 @@ class Collector:
             _write_json(analyzer.response_file, response)
             daily = DailyElectricUsageStore(daily_path())
             run["daily_added"] = daily.merge(rows)
-            daily.save()
+            if not daily.save():
+                unsaved.append(daily.path)
         run["daily_fetched"] = len(rows)
 
         if _truthy(os.getenv("COLLECTOR_BILLS"), True):
             # Same order as the notifier: refresh the newest bill, then fill in older ones.
             # Not under DATA_LOCK: downloads take minutes, and the bill index is written atomically.
             egs = analyzer.fetch_current_egs_from_bill()
-            run["bills_added"] = analyzer.backfill_bill_archive(BillArchive(bills_dir()))
+            bill_archive = BillArchive(bills_dir())
+            run["bills_added"] = analyzer.backfill_bill_archive(bill_archive)
+            if bill_archive.load_failed:
+                unsaved.append(str(bill_archive.index_path))
             if egs is None:
                 run["warnings"].append(
                     "Latest bill: no EGS supply rate (download failed, or the bill is on default service)"
                 )
         logger.info("Collector run finished: %s", {k: v for k, v in run.items() if k != "warnings"})
+        if unsaved:
+            raise ArchiveWriteError(
+                "Couldn't save " + ", ".join(unsaved) + ": a file that couldn't be read is never saved "
+                "over, so nothing new was archived to it. Repair or restore it from a backup; "
+                "moving it aside starts it again from what the utility still has."
+            )
         if hourly_failed:
             raise HourlyFetchError(
                 "Hourly usage fetch returned nothing"
@@ -547,22 +594,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     server = ThreadingHTTPServer((host, port), make_handler(collector, token))
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, name="http", daemon=True).start()
-    auth = {
-        "configured": "bearer token required (the one you set)",
-        "saved": f"bearer token required (generated earlier, saved in {data_dir() / TOKEN_FILE})",
-        "generated": "bearer token required (generated now)",
-        "disabled": "no auth: COLLECTOR_API_TOKEN is set to turn it off",
-    }[token_source]
-    logger.info("Duquesne collector API on %s:%d, %s; data in %s", host, port, auth, data_dir())
-    if token_source == "generated":
-        # Shown once, so the user can enter it in Home Assistant. Set api_token
-        # (COLLECTOR_API_TOKEN) to choose your own instead.
-        logger.warning(
-            "Generated an API token for this collector: %s  Enter it in Home Assistant's "
-            "Duquesne Light (collector) integration. To choose your own, set api_token "
-            "(COLLECTOR_API_TOKEN); 'none' turns authentication off.",
-            token,
-        )
+    announce_api_token(token_source, host, port)
 
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):

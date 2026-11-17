@@ -181,6 +181,62 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(status["last_error"]["type"], "hourly")
         self.assertIn("3 request(s) failed", status["last_error"]["message"])
 
+    def test_run_fails_when_an_archive_file_cant_be_saved(self):
+        """An unreadable archive file is never saved over; the run must say so, not succeed."""
+        import duquesne_light_analyzer as dla
+        from energy_shopper_core.tou import HourlyUsageRecord
+
+        class FakeClient:
+            last_hourly_errors = 0
+
+            def ensure_authenticated(self):
+                pass
+
+            def fetch_hourly_history(self, lookback):
+                return [HourlyUsageRecord(dt="2026-11-02T00:00:00-05:00", kwh=1.0, cost=0.2)]
+
+            def fetch_daily_response(self):
+                return {}
+
+        class FakeAnalyzer:
+            def __init__(self):
+                self.client = FakeClient()
+                self.response_file = os.path.join(os.environ["DATA_DIR"], "duquesne_response.json")
+
+        damaged = os.path.join(self.tmp.name, "hourly_usage.json")
+        with open(damaged, "w") as f:
+            f.write('{"records": [{"dt": "2026-11-01T00:00:00-04:00", "kwh": 1.5')  # cut off
+        os.environ.update(DATA_DIR=self.tmp.name, COLLECTOR_BILLS="0")
+        original = dla.DuquesneLightAnalyzer
+        dla.DuquesneLightAnalyzer = FakeAnalyzer
+        try:
+            collector = col.Collector()
+            self.assertFalse(collector.run_once())
+            status = collector.status()
+        finally:
+            dla.DuquesneLightAnalyzer = original
+            os.environ.pop("DATA_DIR", None)
+            os.environ.pop("COLLECTOR_BILLS", None)
+        self.assertIsNone(status["last_success"])
+        self.assertEqual(status["last_error"]["type"], "archive")
+        self.assertIn("hourly_usage.json", status["last_error"]["message"])
+        with open(damaged) as f:
+            self.assertTrue(f.read().endswith('"kwh": 1.5'))  # left as it was
+
+    def test_generated_token_is_never_logged(self):
+        os.environ["DATA_DIR"] = self.tmp.name
+        os.environ.pop("COLLECTOR_API_TOKEN", None)
+        try:
+            token, source = col.resolve_api_token()
+            with self.assertLogs("collector", level="INFO") as logs:
+                col.announce_api_token(source)
+        finally:
+            os.environ.pop("DATA_DIR", None)
+        output = "\n".join(logs.output)
+        self.assertEqual(source, "generated")
+        self.assertNotIn(token, output)
+        self.assertIn(col.TOKEN_FILE, output)  # where to find it instead
+
     def test_next_run(self):
         now = datetime(2026, 11, 15, 5, 0).astimezone()  # local (America/New_York, EST)
         self.assertEqual(col.Collector.next_after(now, [(4, 30), (16, 0)]).hour, 16)

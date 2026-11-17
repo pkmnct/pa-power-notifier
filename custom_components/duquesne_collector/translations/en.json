@@ -34,7 +34,7 @@
       "invalid_auth": "The collector rejected this token.",
       "not_collector": "Something answered at that URL, but it isn't a Duquesne collector.",
       "unknown": "Unexpected error.",
-      "token_required": "This collector requires its API token. It's in the add-on's log from its first start ('Generated an API token'), or set your own with the add-on's api_token option (COLLECTOR_API_TOKEN for Compose)."
+      "token_required": "This collector requires an API token. Set your own with the add-on's api_token option (COLLECTOR_API_TOKEN for Docker Compose) and enter the same value here. Under Compose, the generated one is in data/collector_api_token on the host."
     },
     "abort": {
       "already_configured": "This collector is already set up.",

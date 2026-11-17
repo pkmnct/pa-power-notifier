@@ -12,8 +12,9 @@ configuration:
   api_token:
     name: API token
     description: >-
-      The token API clients must send ("Authorization: Bearer <token>"). Leave empty to
-      use one generated on first start (shown once in the log), or set "none" to turn
+      The token API clients must send ("Authorization: Bearer <token>"). Set your own and
+      enter the same value in the Duquesne Light (collector) integration. Left empty, a
+      generated token keeps the API closed (it isn't shown anywhere); "none" turns
       authentication off. /health stays open.
   download_bills:
     name: Download bills

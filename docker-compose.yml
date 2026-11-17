@@ -131,7 +131,8 @@ services:
       # Local time(s) for the daily fetch, HH:MM[,HH:MM]
       - COLLECTOR_RUN_AT=${COLLECTOR_RUN_AT:-04:30}
       # Bearer token for the API (every route but /health). Empty: generated on first
-      # start and logged once; "none" turns authentication off.
+      # start and saved as data/collector_api_token (never logged); "none" turns
+      # authentication off.
       - COLLECTOR_API_TOKEN=${COLLECTOR_API_TOKEN:-}
       - COLLECTOR_BILLS=${COLLECTOR_BILLS:-1}
       - DUQUESNE_PUPPETEER_TIMEOUT=${DUQUESNE_PUPPETEER_TIMEOUT:-}
