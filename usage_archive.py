@@ -114,6 +114,22 @@ def write_json_atomic(path: Any, data: Any) -> None:
 
 REFUSED_SAVE = "Not saving %s: it couldn't be read when loaded, and saving would replace the history in it"
 
+# Files whose save was refused since take_refused_saves() last ran, so a caller that
+# saves in many places (the notifier) can report them once, without checking each save.
+_refused_saves: set = set()
+
+
+def _refuse_save(path: Any) -> None:
+    logger.error(REFUSED_SAVE, path)
+    _refused_saves.add(str(path))
+
+
+def take_refused_saves() -> List[str]:
+    """Files whose save was refused (unreadable on load) since the last call; clears the list."""
+    paths = sorted(_refused_saves)
+    _refused_saves.clear()
+    return paths
+
 
 class DailyElectricUsageStore:
     """Accumulate Duquesne daily kWh/cost, keyed by date."""
@@ -198,7 +214,7 @@ class DailyElectricUsageStore:
     def save(self) -> bool:
         """Save the merged records. False when it refused (see load_failed) or failed."""
         if self._load_failed:
-            logger.error(REFUSED_SAVE, self.path)  # never replace a file we couldn't read
+            _refuse_save(self.path)  # never replace a file we couldn't read
             return False
         if not self._records:
             return True
@@ -312,7 +328,7 @@ class GasUsageStore:
     def save(self) -> bool:
         """Save the merged records. False when it refused (see load_failed) or failed."""
         if self._load_failed:
-            logger.error(REFUSED_SAVE, self.path)  # never replace a file we couldn't read
+            _refuse_save(self.path)  # never replace a file we couldn't read
             return False
         if not self._records:
             return True
@@ -391,7 +407,7 @@ class BillArchive:
 
     def _save_index(self) -> None:
         if self._load_failed:
-            logger.error(REFUSED_SAVE, self.index_path)  # it lists bills we don't
+            _refuse_save(self.index_path)  # it lists bills we don't
             return
         payload = {
             "bills": self._index,
@@ -666,7 +682,7 @@ class HourlyUsageStore:
     def save(self) -> bool:
         """Save the merged records. False when it refused (see load_failed) or failed."""
         if self._load_failed:
-            logger.error(REFUSED_SAVE, self.path)  # never replace a file we couldn't read
+            _refuse_save(self.path)  # never replace a file we couldn't read
             return False
         if not self._records:
             return True

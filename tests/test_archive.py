@@ -79,6 +79,38 @@ class ArchiveTests(unittest.TestCase):
         fine.merge([HourlyUsageRecord(dt="2026-11-02T00:00:00-05:00", kwh=1.0, cost=0.0)])
         self.assertIs(fine.save(), True)
 
+    def test_notifier_report_says_when_a_save_was_refused(self):
+        """A notifier-only setup must hear about it: an error in the report, so it's emailed."""
+        from energy_shopper_core.report import CheckReport
+        from recommendation_engine import report_refused_saves
+        from usage_archive import take_refused_saves
+
+        take_refused_saves()  # start clean
+        hourly = self._half_written("hourly_usage.json")
+        store = HourlyUsageStore(hourly)
+        store.merge([HourlyUsageRecord(dt="2026-11-02T00:00:00-05:00", kwh=1.0, cost=0.0)])
+        with self.assertLogs("usage_archive", level="ERROR"):
+            store.save()
+        os.makedirs(os.path.join(self.dir, "bills"))
+        index = os.path.join(self.dir, "bills", "index.json")
+        with open(index, "w") as f:
+            f.write(HALF_WRITTEN)
+        with self.assertLogs("usage_archive", level="ERROR"):
+            BillArchive(os.path.join(self.dir, "bills"))._save_index()  # noqa: SLF001
+
+        report = CheckReport()
+        with self.assertLogs(level="ERROR"):
+            report_refused_saves(report)
+        errors = [w for w in report.warnings if w.level == "error" and w.source == "archive"]
+        self.assertEqual(len(errors), 2)
+        self.assertIn(hourly, errors[1].message + errors[0].message)
+        self.assertIn(index, errors[1].message + errors[0].message)
+        self.assertTrue(report.should_email())
+
+        later = CheckReport()
+        report_refused_saves(later)  # the next run starts from nothing
+        self.assertEqual(later.warnings, [])
+
     def test_write_is_flushed_to_disk_before_the_rename(self):
         """Otherwise a power cut soon after a save can leave the renamed file empty."""
         import usage_archive

@@ -397,6 +397,26 @@ def _filters_list(checker: Any) -> List[str]:
     return out
 
 
+def report_refused_saves(report: CheckReport) -> None:
+    """
+    An archive file that couldn't be read is never saved over, so nothing new reaches it.
+    Say so in the report, as an error (so it's emailed), not only in the log: otherwise
+    the archive stops growing unnoticed while the utilities drop their history.
+    """
+    try:
+        from usage_archive import take_refused_saves
+    except ImportError:
+        return
+    for path in take_refused_saves():
+        report.add_warning(
+            "error",
+            "archive",
+            f"Couldn't save {path}: it couldn't be read, so it isn't saved over and nothing "
+            "new was archived to it. Repair or restore it from a backup; moving it aside "
+            "starts it again from what the utilities still have.",
+        )
+
+
 def _collect_hourly(checker: Any, report: CheckReport) -> List:
     if HourlyUsageStore is None:
         report.add_warning("info", "tou", "usage_archive not available; hourly store unavailable")
