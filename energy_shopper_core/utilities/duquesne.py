@@ -357,6 +357,9 @@ class DuquesneClient:
         self.session.headers.update({"User-Agent": USER_AGENT})
         self.opower_token = opower_token
         self.token_expires_at = float(token_expires_at or 0.0)
+        # Hourly windows that failed (request or response error) in the last
+        # fetch_hourly_history, so a caller can tell "no data" from "couldn't fetch".
+        self.last_hourly_errors = 0
 
     # -- authentication ----------------------------------------------------
 
@@ -549,10 +552,11 @@ class DuquesneClient:
         except (requests.RequestException, ValueError) as exc:
             raise DuquesneError(f"Error fetching Duquesne Light data: {exc}") from exc
 
-    def fetch_hourly_window(self, start: datetime, end: datetime) -> List[HourlyUsageRecord]:
+    def fetch_hourly_window(self, start: datetime, end: datetime) -> Optional[List[HourlyUsageRecord]]:
         """
-        One HOUR-resolution window (keep it ≤ MAX_HOURLY_DAYS). Request errors are
-        logged and give [] so a backfill can keep paging; call ensure_authenticated first.
+        One HOUR-resolution window (keep it ≤ MAX_HOURLY_DAYS). A request error is logged
+        and gives None, unlike a window with no reads ([]), so a backfill can tell a
+        failure from the end of the history; call ensure_authenticated first.
         """
         payload = {
             "operationName": "WDB_GetCostReadsForDayAndHour",
@@ -575,7 +579,10 @@ class DuquesneClient:
             data = response.json()
         except Exception as exc:
             logger.error("Error fetching hourly Duquesne data: %s", exc)
-            return []
+            return None
+        if not isinstance(data, dict) or (data.get("errors") and not data.get("data")):
+            logger.error("Duquesne hourly API returned errors only: %s", (data or {}).get("errors") if isinstance(data, dict) else data)
+            return None
         records = parse_hourly(data)
         logger.info("Fetched %d hourly usage records from Duquesne Light", len(records))
         return records
@@ -590,7 +597,7 @@ class DuquesneClient:
         self.ensure_authenticated()
         self._require_account()
         end = end or datetime.now()
-        return self.fetch_hourly_window(end - timedelta(days=days), end)
+        return self.fetch_hourly_window(end - timedelta(days=days), end) or []
 
     def fetch_hourly_history(
         self, lookback_days: int = DEFAULT_HOURLY_LOOKBACK_DAYS, now: Optional[datetime] = None
@@ -600,7 +607,8 @@ class DuquesneClient:
 
         Each check only needs the newest window for freshness; this fills gaps that a
         single rolling fetch would miss. Stops after two consecutive empty windows or
-        when the lookback is exhausted. Deduplicated by hour.
+        when the lookback is exhausted; a failed window is skipped (it isn't the end of
+        the history) and counted in last_hourly_errors. Deduplicated by hour.
         """
         lookback = max(MAX_HOURLY_DAYS, lookback_days)
         self.ensure_authenticated()
@@ -611,13 +619,16 @@ class DuquesneClient:
         earliest = end - timedelta(days=lookback)
         empty_streak = 0
         windows = 0
+        self.last_hourly_errors = 0
         while end > earliest:
             start = max(earliest, end - timedelta(days=MAX_HOURLY_DAYS))
             if start >= end:
                 break
             chunk = self.fetch_hourly_window(start, end)
             windows += 1
-            if chunk:
+            if chunk is None:
+                self.last_hourly_errors += 1  # failed, not empty: keep paging past it
+            elif chunk:
                 all_records.extend(chunk)
                 empty_streak = 0
             else:
@@ -632,9 +643,10 @@ class DuquesneClient:
 
         out = list({r.dt: r for r in all_records}.values())
         logger.info(
-            "Hourly history backfill: %d unique hours across %d windows (lookback=%dd)",
+            "Hourly history backfill: %d unique hours across %d windows (%d failed, lookback=%dd)",
             len(out),
             windows,
+            self.last_hourly_errors,
             lookback,
         )
         return out

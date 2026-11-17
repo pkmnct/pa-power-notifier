@@ -67,12 +67,31 @@ class DailyUsageRecord:
     effective_rate: float = 0.0
 
 
+def write_json_atomic(path: Any, data: Any) -> None:
+    """
+    Write JSON through a temp file and an atomic rename, so a reader (the collector API,
+    or the notifier and collector sharing data/) sees the old file or the new one, never
+    half of one. The temp name is per process, so two writers can't collide on it.
+    """
+    path = str(path)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
 class DailyElectricUsageStore:
     """Accumulate Duquesne daily kWh/cost, keyed by date."""
 
     def __init__(self, path: Optional[str] = None):
         self.path = path or daily_usage_path()
         self._records: Dict[str, dict] = {}
+        self._load_failed = False
         self._load()
 
     def _load(self) -> None:
@@ -90,7 +109,8 @@ class DailyElectricUsageStore:
                 data.get("latest", "?"),
             )
         except Exception as e:
-            logger.warning("Could not load daily usage store %s: %s", self.path, e)
+            self._load_failed = True
+            logger.error("Could not load daily usage store %s (%s); it won't be saved over", self.path, e)
 
     def merge(self, records: Iterable[Any]) -> int:
         """
@@ -141,10 +161,9 @@ class DailyElectricUsageStore:
         return added
 
     def save(self) -> None:
-        if not self._records:
-            return
+        if not self._records or self._load_failed:
+            return  # never replace a file we couldn't read: it holds history we don't
         try:
-            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
             dates = sorted(self._records.keys())
             data = {
                 "records": [self._records[d] for d in dates],
@@ -153,8 +172,7 @@ class DailyElectricUsageStore:
                 "latest": dates[-1],
                 "last_updated": datetime.now().isoformat(timespec="seconds"),
             }
-            with open(self.path, "w") as f:
-                json.dump(data, f, indent=2)
+            write_json_atomic(self.path, data)
             logger.info("Saved %d daily electric records to %s", len(self._records), self.path)
         except Exception as e:
             logger.error("Could not save daily usage store: %s", e)
@@ -172,6 +190,7 @@ class GasUsageStore:
     def __init__(self, path: Optional[str] = None):
         self.path = path or gas_usage_path()
         self._records: Dict[str, dict] = {}
+        self._load_failed = False
         self._load()
 
     @staticmethod
@@ -201,7 +220,8 @@ class GasUsageStore:
                 self.path,
             )
         except Exception as e:
-            logger.warning("Could not load gas usage store %s: %s", self.path, e)
+            self._load_failed = True
+            logger.error("Could not load gas usage store %s (%s); it won't be saved over", self.path, e)
 
     def merge(self, records: Iterable[Any]) -> int:
         added = 0
@@ -244,10 +264,9 @@ class GasUsageStore:
         return added
 
     def save(self) -> None:
-        if not self._records:
-            return
+        if not self._records or self._load_failed:
+            return  # never replace a file we couldn't read: it holds history we don't
         try:
-            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
             rows = sorted(
                 self._records.values(),
                 key=lambda r: (r.get("year", 0), r.get("month", 0), r.get("to_date") or ""),
@@ -257,8 +276,7 @@ class GasUsageStore:
                 "record_count": len(rows),
                 "last_updated": datetime.now().isoformat(timespec="seconds"),
             }
-            with open(self.path, "w") as f:
-                json.dump(data, f, indent=2)
+            write_json_atomic(self.path, data)
             logger.info("Saved %d gas usage cycles to %s", len(rows), self.path)
         except Exception as e:
             logger.error("Could not save gas usage store: %s", e)
@@ -296,6 +314,7 @@ class BillArchive:
         self.directory = Path(directory or bill_archive_dir())
         self.index_path = self.directory / "index.json"
         self._index: Dict[str, dict] = {}
+        self._load_failed = False
         self._load()
 
     def _load(self) -> None:
@@ -310,19 +329,18 @@ class BillArchive:
                 if entry.get("pdf"):
                     entry["pdf"] = Path(entry["pdf"]).name
         except Exception as e:
-            logger.warning("Could not load bill archive index: %s", e)
+            self._load_failed = True
+            logger.error("Could not load bill archive index %s (%s); it won't be saved over", self.index_path, e)
 
     def _save_index(self) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True)
+        if self._load_failed:
+            return  # never replace an index we couldn't read: it lists bills we don't
         payload = {
             "bills": self._index,
             "bill_count": len(self._index),
             "last_updated": datetime.now().isoformat(timespec="seconds"),
         }
-        # Temp file + rename: a reader (the collector API) never sees a half-written index
-        tmp = self.index_path.with_name(self.index_path.name + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=2))
-        os.replace(tmp, self.index_path)
+        write_json_atomic(self.index_path, payload)
 
     def archive_pdf(
         self,
@@ -513,7 +531,9 @@ class MarketArchive:
             rows.append({"date": day, "utility": utility, "price": price, "unit": unit, "source": source})
             rows.sort(key=lambda r: (r.get("date", ""), r.get("utility", "")))
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+            tmp.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            os.replace(tmp, path)
         except Exception as e:
             logger.warning("Could not log %s Price to Compare: %s", utility, e)
 
@@ -534,6 +554,7 @@ class HourlyUsageStore:
     def __init__(self, path: str):
         self.path = path
         self._records: Dict[str, dict] = {}
+        self._load_failed = False
         self._load()
 
     def _load(self):
@@ -549,7 +570,8 @@ class HourlyUsageStore:
                 data.get('earliest', '?'), data.get('latest', '?'),
             )
         except Exception as e:
-            logger.warning("Could not load hourly usage store at %s: %s", self.path, e)
+            self._load_failed = True
+            logger.error("Could not load hourly usage store %s (%s); it won't be saved over", self.path, e)
 
     def merge(self, records: List[HourlyUsageRecord]) -> int:
         """
@@ -581,10 +603,9 @@ class HourlyUsageStore:
         return added
 
     def save(self):
-        if not self._records:
-            return
+        if not self._records or self._load_failed:
+            return  # never replace a file we couldn't read: it holds history we don't
         try:
-            os.makedirs(os.path.dirname(self.path) or '.', exist_ok=True)
             sorted_dts = sorted(self._records.keys())
             data = {
                 'records': [self._records[dt] for dt in sorted_dts],
@@ -593,8 +614,7 @@ class HourlyUsageStore:
                 'latest': sorted_dts[-1],
                 'last_updated': datetime.now().isoformat(),
             }
-            with open(self.path, 'w') as f:
-                json.dump(data, f, indent=2)
+            write_json_atomic(self.path, data)
             logger.info("Saved %d hourly records to %s", len(self._records), self.path)
         except Exception as e:
             logger.error("Could not save hourly usage store: %s", e)

@@ -127,6 +127,60 @@ class CollectorTests(unittest.TestCase):
             os.environ.pop("DATA_DIR", None)
         self.assertEqual(collector.state["first_started_at"], col._iso(collector.started_at))
 
+    def test_api_token_is_generated_saved_configured_or_off(self):
+        os.environ["DATA_DIR"] = self.tmp.name
+        os.environ.pop("COLLECTOR_API_TOKEN", None)
+        try:
+            token, source = col.resolve_api_token()
+            self.assertEqual(source, "generated")
+            self.assertGreaterEqual(len(token), 30)
+            path = os.path.join(self.tmp.name, col.TOKEN_FILE)
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            self.assertEqual(col.resolve_api_token(), (token, "saved"))  # same after a restart
+            os.environ["COLLECTOR_API_TOKEN"] = "mine"
+            self.assertEqual(col.resolve_api_token(), ("mine", "configured"))
+            os.environ["COLLECTOR_API_TOKEN"] = "None"
+            self.assertEqual(col.resolve_api_token(), ("", "disabled"))
+        finally:
+            os.environ.pop("DATA_DIR", None)
+            os.environ.pop("COLLECTOR_API_TOKEN", None)
+
+    def test_run_fails_when_no_hourly_usage_comes_back(self):
+        import duquesne_light_analyzer as dla
+
+        class FakeClient:
+            last_hourly_errors = 0
+
+            def ensure_authenticated(self):
+                pass
+
+            def fetch_hourly_history(self, lookback):
+                self.last_hourly_errors = 3  # every window failed
+                return []
+
+            def fetch_daily_response(self):
+                return {}
+
+        class FakeAnalyzer:
+            def __init__(self):
+                self.client = FakeClient()
+                self.response_file = os.path.join(os.environ["DATA_DIR"], "duquesne_response.json")
+
+        os.environ.update(DATA_DIR=self.tmp.name, COLLECTOR_BILLS="0")
+        original = dla.DuquesneLightAnalyzer
+        dla.DuquesneLightAnalyzer = FakeAnalyzer
+        try:
+            collector = col.Collector()
+            self.assertFalse(collector.run_once())
+            status = collector.status()
+        finally:
+            dla.DuquesneLightAnalyzer = original
+            os.environ.pop("DATA_DIR", None)
+            os.environ.pop("COLLECTOR_BILLS", None)
+        self.assertIsNone(status["last_success"])
+        self.assertEqual(status["last_error"]["type"], "hourly")
+        self.assertIn("3 request(s) failed", status["last_error"]["message"])
+
     def test_next_run(self):
         now = datetime(2026, 11, 15, 5, 0).astimezone()  # local (America/New_York, EST)
         self.assertEqual(col.Collector.next_after(now, [(4, 30), (16, 0)]).hour, 16)

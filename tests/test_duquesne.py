@@ -218,5 +218,30 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(len(session.graphql_calls), 4)
 
 
+    def test_hourly_history_pages_past_failed_windows(self):
+        def graphql(payload):
+            start = payload["variables"]["timeInterval"][:10]
+            if "2026-08-20" <= start < "2026-10-17":
+                raise requests.ConnectionError("timeout")  # two windows fail
+            return HOURLY if start >= "2026-07-01" else {}
+
+        session = FakeSession(graphql=graphql)
+        client = dq.DuquesneClient("u", "p", customer_uuid="c", utility_account_uuid="ua",
+                                   opower_token="t", token_expires_at=4102444800, session=session)
+        client.fetch_hourly_history(lookback_days=400, now=datetime(2026, 11, 15))
+        self.assertEqual(client.last_hourly_errors, 2)
+        # Failures aren't the end of the history: it reached the July window and then
+        # stopped on two genuinely empty ones (not after the two failures, at call 3).
+        starts = [c["variables"]["timeInterval"][:10] for c in session.graphql_calls]
+        self.assertIn("2026-07-22", starts)
+        self.assertEqual(len(starts), 6)
+
+    def test_hourly_window_error_payload_is_a_failure(self):
+        session = FakeSession(graphql=lambda p: {"errors": [{"message": "unauthorized"}]})
+        client = dq.DuquesneClient("u", "p", customer_uuid="c", utility_account_uuid="ua",
+                                   opower_token="t", token_expires_at=4102444800, session=session)
+        self.assertIsNone(client.fetch_hourly_window(datetime(2026, 11, 1), datetime(2026, 11, 2)))
+        self.assertEqual(client.fetch_hourly(1, datetime(2026, 11, 2)), [])
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,8 +17,10 @@ Home Assistant itself can do neither.
 1. Set **username** and **password** to your duquesnelight.com login and start the
    add-on. The first run fetches about 400 days of hourly usage and every bill, which
    takes a few minutes; watch the **Log** tab.
-2. Add the integration: Settings → Devices & services → Add integration →
-   **Duquesne Light (collector)**, with URL `http://localhost:8765`.
+2. Copy the API token from the log ("Generated an API token for this collector: …"). It's
+   shown once, on the first start; to choose your own, set `api_token` instead.
+3. Add the integration: Settings → Devices & services → Add integration →
+   **Duquesne Light (collector)**, with URL `http://localhost:8765` and that token.
 
 ## Options
 
@@ -26,7 +28,7 @@ Home Assistant itself can do neither.
 |---|---|---|
 | `username`, `password` | | duquesnelight.com login |
 | `run_at` | `04:30` | Local time(s) of the daily fetch, `HH:MM` or `HH:MM,HH:MM` |
-| `api_token` | unset | Require `Authorization: Bearer <token>` on the API; enter the same token in the integration |
+| `api_token` | generated | The API token clients must send (`Authorization: Bearer <token>`). Empty: one is generated on first start and shown once in the log. `none` turns authentication off |
 | `download_bills` | on | Download new bill PDFs (where the supplier and supply rate come from) |
 | `hourly_lookback_days` | `400` | How far back hourly usage is paged on each run |
 | `log_level` | `info` | |

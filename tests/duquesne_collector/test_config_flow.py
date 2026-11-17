@@ -49,7 +49,9 @@ async def test_second_collector_gets_its_own_statistics(hass: HomeAssistant, col
 
 async def test_errors(hass: HomeAssistant, collector: FakeCollector, aioclient_mock: AiohttpClientMocker) -> None:
     collector.reject_auth = True
-    assert (await _submit(hass, {CONF_URL: URL}))["errors"] == {CONF_API_TOKEN: "invalid_auth"}
+    # No token for a collector that wants one (it generates one by default): say where to find it.
+    assert (await _submit(hass, {CONF_URL: URL}))["errors"] == {CONF_API_TOKEN: "token_required"}
+    assert (await _submit(hass, {CONF_URL: URL, CONF_API_TOKEN: "wrong"}))["errors"] == {CONF_API_TOKEN: "invalid_auth"}
     collector.reject_auth = False
     collector.down = True
     assert (await _submit(hass, {CONF_URL: URL}))["errors"] == {"base": "cannot_connect"}

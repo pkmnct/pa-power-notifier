@@ -42,7 +42,7 @@ class CollectorConfigFlow(ConfigFlow, domain=DOMAIN):
         try:
             await client.status()
         except CollectorAuthError:
-            return data, {CONF_API_TOKEN: "invalid_auth"}
+            return data, {CONF_API_TOKEN: "invalid_auth" if data.get(CONF_API_TOKEN) else "token_required"}
         except NotACollectorError:
             return data, {"base": "not_collector"}
         except CollectorError as err:

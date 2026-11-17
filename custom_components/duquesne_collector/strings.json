@@ -10,7 +10,7 @@
         },
         "data_description": {
           "url": "The add-on listens on port 8765: http://localhost:8765 on Home Assistant OS, or http://HOST:8765 (the collector machine's address) for a Docker Compose collector elsewhere.",
-          "api_token": "Only if you set api_token on the add-on (COLLECTOR_API_TOKEN for Compose)."
+          "api_token": "The collector generates one on first start and shows it in its log. If you set api_token (COLLECTOR_API_TOKEN for Compose), use that instead."
         }
       },
       "reconfigure": {
@@ -33,7 +33,8 @@
       "cannot_connect": "Couldn't reach the collector at that URL.",
       "invalid_auth": "The collector rejected this token.",
       "not_collector": "Something answered at that URL, but it isn't a Duquesne collector.",
-      "unknown": "Unexpected error."
+      "unknown": "Unexpected error.",
+      "token_required": "This collector requires its API token. It's in the add-on's log from its first start ('Generated an API token'), or set your own with the add-on's api_token option (COLLECTOR_API_TOKEN for Compose)."
     },
     "abort": {
       "already_configured": "This collector is already set up.",

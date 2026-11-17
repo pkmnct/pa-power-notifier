@@ -28,7 +28,7 @@ Options:
 |---|---|---|
 | `username`, `password` | — | duquesnelight.com login |
 | `run_at` | `04:30` | Local time(s) of the daily fetch, `HH:MM[,HH:MM]` |
-| `api_token` | unset | If set, clients must send `Authorization: Bearer <token>` |
+| `api_token` | generated | Clients must send `Authorization: Bearer <token>`. Empty: generated on first start, logged once and saved as `collector_api_token` in the data folder. `none` turns authentication off |
 | `download_bills` | `true` | Download new bill PDFs each run (supplier + supply rate) |
 | `hourly_lookback_days` | `400` | How far back to page hourly usage |
 | `log_level` | `info` | |
@@ -66,8 +66,11 @@ over the existing archive and never fetches.
 
 ## API
 
-Every response is JSON. When a token is configured, every route except `/health` needs
-`Authorization: Bearer <token>`; without one, `401`. Other methods get `405`.
+Every response is JSON. Every route except `/health` needs `Authorization: Bearer <token>`
+(`401` without it), unless the token is set to `none`. Other methods get `405`. Your usage
+and bills say a lot about a household, so the API isn't open by default: with no token
+configured, one is generated on first start, logged once ("Generated an API token"), and
+saved as `collector_api_token` in the data folder.
 
 ### `GET /usage?start=&end=`
 
@@ -150,7 +153,7 @@ set after a later success, so compare its time with `last_success`.
 |---|---|---|
 | `DUQUESNE_USERNAME`, `DUQUESNE_PASSWORD` | — | Login |
 | `COLLECTOR_PORT` / `COLLECTOR_HOST` | `8765` / `0.0.0.0` | API bind |
-| `COLLECTOR_API_TOKEN` | unset | Bearer token |
+| `COLLECTOR_API_TOKEN` | generated | Bearer token; empty generates one, `none` turns auth off |
 | `COLLECTOR_RUN_AT` | `04:30` | Daily fetch time(s), local (`TZ`) |
 | `COLLECTOR_RUN_ON_START` | `auto` | `auto` runs at start unless a run succeeded in the last 20 h; `1` / `0` |
 | `COLLECTOR_BILLS` | `1` | Download bill PDFs |

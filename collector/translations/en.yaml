@@ -12,8 +12,9 @@ configuration:
   api_token:
     name: API token
     description: >-
-      Optional. When set, API clients must send "Authorization: Bearer <token>".
-      /health stays open.
+      The token API clients must send ("Authorization: Bearer <token>"). Leave empty to
+      use one generated on first start (shown once in the log), or set "none" to turn
+      authentication off. /health stays open.
   download_bills:
     name: Download bills
     description: Download new bill PDFs each run (needed for supplier and supply rate).

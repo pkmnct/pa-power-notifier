@@ -36,6 +36,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import signal
 import sys
 import threading
@@ -110,13 +111,42 @@ def _read_json(path: str) -> dict:
         return {}
 
 
+TOKEN_FILE = "collector_api_token"
+TOKEN_OFF = ("none", "off", "disabled")
+
+
+def resolve_api_token() -> Tuple[str, str]:
+    """
+    The API token and where it came from: "configured" (COLLECTOR_API_TOKEN / the
+    add-on's api_token), "disabled" (set to none/off: no auth, a deliberate choice),
+    "saved" (generated on an earlier start), or "generated" (now). Usage and bills say
+    a lot about a household, so the API isn't open to the network by default.
+    """
+    configured = (os.getenv("COLLECTOR_API_TOKEN") or "").strip()
+    if configured.lower() in TOKEN_OFF:
+        return "", "disabled"
+    if configured:
+        return configured, "configured"
+    path = data_dir() / TOKEN_FILE
+    try:
+        saved = path.read_text().strip()
+    except FileNotFoundError:
+        saved = ""
+    if saved:
+        return saved, "saved"
+    token = secrets.token_urlsafe(24)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # readable by the collector only
+    with os.fdopen(fd, "w") as f:
+        f.write(token + "\n")
+    return token, "generated"
+
+
 def _write_json(path: str, data: dict) -> None:
     """Write via a temp file and rename, so readers see the old or the new file, never half."""
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = f"{path}.tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, path)
+    from usage_archive import write_json_atomic
+
+    write_json_atomic(path, data)
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +272,10 @@ def _archive_summary() -> dict:
 # Fetch job
 # ---------------------------------------------------------------------------
 
+class HourlyFetchError(RuntimeError):
+    """The run fetched daily usage and bills, but no hourly usage came back."""
+
+
 class Collector:
     def __init__(self):
         self.state = _read_json(status_path())
@@ -303,9 +337,10 @@ class Collector:
             kind = (
                 "auth" if isinstance(e, DuquesneAuthError)
                 else "blocked" if isinstance(e, DuquesneBlockedError)
+                else "hourly" if isinstance(e, HourlyFetchError)
                 else type(e).__name__
             )
-            logger.error("Collector run failed (%s): %s", kind, e, exc_info=kind not in ("auth", "blocked"))
+            logger.error("Collector run failed (%s): %s", kind, e, exc_info=kind not in ("auth", "blocked", "hourly"))
             self.state["last_error"] = {"at": _iso(_now()), "type": kind, "message": str(e)}
         finally:
             run["finished_at"] = _iso(_now())
@@ -332,11 +367,19 @@ class Collector:
         hourly = client.fetch_hourly_history(lookback)
         with DATA_LOCK:
             store = HourlyUsageStore(hourly_path())
+            had_hours = len(store) > 0
             run["hourly_added"] = store.merge(hourly)
             store.save()
         run["hourly_fetched"] = len(hourly)
+        run["hourly_errors"] = client.last_hourly_errors
+        # Nothing back, after requests failed or after we'd had hourly data before: the
+        # hourly feed is broken, not empty. The rest of the run still goes ahead, but it
+        # must not count as a success (Home Assistant's stale repair keys off that).
+        hourly_failed = not hourly and (client.last_hourly_errors > 0 or had_hours)
         if not hourly:
-            run["warnings"].append("Hourly fetch returned no records")
+            run["warnings"].append(
+                f"Hourly fetch returned no records ({client.last_hourly_errors} window(s) failed)"
+            )
 
         response = client.fetch_daily_response()
         analysis = core.analyze_response(response)
@@ -358,6 +401,11 @@ class Collector:
                     "Latest bill: no EGS supply rate (download failed, or the bill is on default service)"
                 )
         logger.info("Collector run finished: %s", {k: v for k, v in run.items() if k != "warnings"})
+        if hourly_failed:
+            raise HourlyFetchError(
+                "Hourly usage fetch returned nothing"
+                + (f" ({client.last_hourly_errors} request(s) failed)" if client.last_hourly_errors else "")
+            )
 
     # -- schedule ----------------------------------------------------------
 
@@ -493,16 +541,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.once:
         return 0 if collector.run_once() else 1
 
-    token = (os.getenv("COLLECTOR_API_TOKEN") or "").strip()
+    token, token_source = resolve_api_token()
     host = os.getenv("COLLECTOR_HOST") or "0.0.0.0"
     port = int(os.getenv("COLLECTOR_PORT") or DEFAULT_PORT)
     server = ThreadingHTTPServer((host, port), make_handler(collector, token))
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, name="http", daemon=True).start()
-    logger.info(
-        "Duquesne collector API on %s:%d (%s); data in %s",
-        host, port, "bearer token required" if token else "no auth token set", data_dir(),
-    )
+    auth = {
+        "configured": "bearer token required (the one you set)",
+        "saved": f"bearer token required (generated earlier, saved in {data_dir() / TOKEN_FILE})",
+        "generated": "bearer token required (generated now)",
+        "disabled": "no auth: COLLECTOR_API_TOKEN is set to turn it off",
+    }[token_source]
+    logger.info("Duquesne collector API on %s:%d, %s; data in %s", host, port, auth, data_dir())
+    if token_source == "generated":
+        # Shown once, so the user can enter it in Home Assistant. Set api_token
+        # (COLLECTOR_API_TOKEN) to choose your own instead.
+        logger.warning(
+            "Generated an API token for this collector: %s  Enter it in Home Assistant's "
+            "Duquesne Light (collector) integration. To choose your own, set api_token "
+            "(COLLECTOR_API_TOKEN); 'none' turns authentication off.",
+            token,
+        )
 
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
