@@ -443,10 +443,11 @@ class BillArchive:
         """The index exists but couldn't be read, so it won't be saved over."""
         return self._load_failed
 
-    def _save_index(self) -> None:
+    def _save_index(self) -> bool:
+        """Write the index. False when it refused (see load_failed) or the write failed (recorded)."""
         if self._load_failed:
             _refuse_save(self.index_path)  # it lists bills we don't
-            return
+            return False
         payload = {
             "bills": self._index,
             "bill_count": len(self._index),
@@ -454,8 +455,10 @@ class BillArchive:
         }
         try:
             write_json_atomic(self.index_path, payload)
+            return True
         except Exception as e:  # recorded, so the notifier reports it and the collector's run fails
             _save_failed(self.index_path, e)
+            return False
 
     def archive_pdf(
         self,
@@ -511,7 +514,11 @@ class BillArchive:
             if bill_date and not entry.get("bill_date"):
                 entry["bill_date"] = bill_date
             self._index[bill_id] = entry
-            self._save_index()
+            if not self._save_index():
+                # The PDF is there, but its supplier, rate and date live in the index: the
+                # bill isn't archived until that's saved (a backfill mustn't count it, and
+                # the next run, reloading the old index, tries it again).
+                return None
             if update_latest:
                 # Also keep a convenience pointer to the newest PDF
                 latest = self.directory / "latest_bill.pdf"

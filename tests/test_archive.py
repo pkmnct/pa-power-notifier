@@ -152,8 +152,12 @@ class ArchiveTests(unittest.TestCase):
         archive = BillArchive(bills)
         with mock.patch.object(usage_archive, "write_text_atomic", side_effect=OSError(13, "Permission denied")):
             with self.assertLogs("usage_archive", level="ERROR"):
-                archive.archive_pdf(src, "B1", bill_date="2026-11-01", update_latest=False)
+                saved = archive.archive_pdf(src, "B1", bill_date="2026-11-01", update_latest=False)
         self.assertEqual(take_failed_saves(), [(os.path.join(bills, "index.json"), WRITE_FAILED)])
+        # The PDF was copied, but without its index entry the bill isn't archived: a
+        # backfill must not count it.
+        self.assertTrue(os.path.exists(os.path.join(bills, "B1.pdf")))
+        self.assertIsNone(saved)
 
         with mock.patch.object(usage_archive.shutil, "copy2", side_effect=OSError(28, "No space left on device")):
             with self.assertLogs("usage_archive", level="ERROR"):
