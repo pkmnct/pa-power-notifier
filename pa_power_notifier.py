@@ -739,7 +739,9 @@ class RateChecker:
                 server.login(self.smtp_username, self.smtp_password)
                 server.send_message(msg)
             logger.info("Email sent to %s", self.notify_to)
-            _record_email_state(report)
+            # No _record_email_state here: that fingerprints the report for EMAIL_MODE=change,
+            # and this legacy email has no report (the call raised NameError after sending,
+            # which logged a sent email as "Failed to send email").
         except Exception as e:
             logger.error("Failed to send email: %s", e)
 
