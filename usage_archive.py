@@ -633,13 +633,13 @@ class MarketArchive:
         if not csv_text:
             return None
         day = day or datetime.now().date().isoformat()
+        dest = self.directory / utility / f"{day}.csv"
         try:
-            dest = self.directory / utility / f"{day}.csv"
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(csv_text)
+            # Atomic: a run killed mid-write mustn't leave the day's only snapshot truncated.
+            write_text_atomic(dest, csv_text)
             return str(dest)
-        except Exception as e:
-            logger.warning("Could not archive %s offers CSV: %s", utility, e)
+        except Exception as e:  # recorded, so the notifier's report says so
+            _save_failed(dest, e)
             return None
 
     def log_price_to_compare(
@@ -647,17 +647,22 @@ class MarketArchive:
     ) -> None:
         day = day or datetime.now().date().isoformat()
         path = self.directory / "price_to_compare.jsonl"
+        rows = []
         try:
-            rows = []
             if path.is_file():
                 rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        except (OSError, ValueError):
+            # A history that can't be read isn't saved over: rewriting it from the lines that
+            # parse would drop the rest. Recorded, so the report says so (and how to fix it).
+            _refuse_save(path)
+            return
+        try:
             rows = [r for r in rows if not (r.get("date") == day and r.get("utility") == utility)]
             rows.append({"date": day, "utility": utility, "price": price, "unit": unit, "source": source})
             rows.sort(key=lambda r: (r.get("date", ""), r.get("utility", "")))
-            path.parent.mkdir(parents=True, exist_ok=True)
             write_text_atomic(path, "".join(json.dumps(r) + "\n" for r in rows))
-        except Exception as e:
-            logger.warning("Could not log %s Price to Compare: %s", utility, e)
+        except Exception as e:  # recorded, so the notifier's report says so
+            _save_failed(path, e)
 
 
 # ---------------------------------------------------------------------------

@@ -183,6 +183,62 @@ class ArchiveTests(unittest.TestCase):
         self.assertIn("internal error", advice)
         self.assertNotIn("disk full", advice)
 
+    def test_unreadable_price_to_compare_history_is_refused_and_reported(self):
+        """Rewriting it from the lines that parse would drop the rest; the report must say so."""
+        from usage_archive import UNREADABLE, MarketArchive, take_failed_saves
+
+        take_failed_saves()  # start clean
+        market = os.path.join(self.dir, "market")
+        os.makedirs(market)
+        history = os.path.join(market, "price_to_compare.jsonl")
+        damaged = '{"date": "2026-11-01", "utility": "electric", "price": 0.1414}\n{"date": "2026-11-02", "util'
+        with open(history, "w") as f:
+            f.write(damaged)
+        with self.assertLogs("usage_archive", level="ERROR"):
+            MarketArchive(market).log_price_to_compare("electric", 0.15, "kWh", "test")
+        with open(history) as f:
+            self.assertEqual(f.read(), damaged)  # left as it was
+        self.assertEqual(take_failed_saves(), [(history, UNREADABLE)])
+
+    def test_offers_snapshot_write_failure_is_recorded(self):
+        from usage_archive import WRITE_FAILED, MarketArchive, take_failed_saves
+
+        take_failed_saves()
+        market = os.path.join(self.dir, "market")
+        os.makedirs(market)
+        with open(os.path.join(market, "electric"), "w") as f:
+            f.write("not a folder")  # so the snapshot can't be written
+        with self.assertLogs("usage_archive", level="ERROR"):
+            self.assertIsNone(MarketArchive(market).save_offers_csv("electric", "a,b\n1,2\n", day="2026-11-18"))
+        self.assertEqual(
+            take_failed_saves(), [(os.path.join(market, "electric", "2026-11-18.csv"), WRITE_FAILED)]
+        )
+
+    def test_offers_snapshot_is_written_atomically(self):
+        """The day's only snapshot mustn't be left half-written by a run killed mid-write."""
+        import usage_archive
+        from usage_archive import MarketArchive
+
+        events = []
+        real_fsync, real_replace = os.fsync, os.replace
+
+        def fsync(fd):
+            events.append("fsync")
+            return real_fsync(fd)
+
+        def replace(src, dst):
+            events.append("replace")
+            return real_replace(src, dst)
+
+        usage_archive.os.fsync, usage_archive.os.replace = fsync, replace
+        try:
+            path = MarketArchive(self.dir).save_offers_csv("gas", "a,b\n1,2\n", day="2026-11-18")
+        finally:
+            usage_archive.os.fsync, usage_archive.os.replace = real_fsync, real_replace
+        self.assertEqual(events[:2], ["fsync", "replace"])
+        with open(path) as f:
+            self.assertEqual(f.read(), "a,b\n1,2\n")
+
     def test_write_is_flushed_to_disk_before_the_rename(self):
         """Otherwise a power cut soon after a save can leave the renamed file empty."""
         import usage_archive
