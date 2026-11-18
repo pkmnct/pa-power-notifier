@@ -110,7 +110,7 @@ class PeoplesGasAnalyzer:
             with tempfile.NamedTemporaryFile(suffix=".pdf") as tf:
                 tf.write(pdf)
                 tf.flush()
-                archive.archive_pdf(
+                saved = archive.archive_pdf(
                     tf.name,
                     invoice,
                     bill_date=(row.get("DBDate") or "")[:10],
@@ -118,7 +118,8 @@ class PeoplesGasAnalyzer:
                     details=details,
                     update_latest=False,
                 )
-            added += 1
+            if saved:  # not counted when the save failed (it's recorded and reported)
+                added += 1
         if added:
             logger.info("Archived %d People's Gas bill PDFs", added)
         return added

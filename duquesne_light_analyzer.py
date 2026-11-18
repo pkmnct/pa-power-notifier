@@ -243,7 +243,7 @@ class DuquesneLightAnalyzer:
                     continue
                 meta = self.parse_bill_meta(text)
                 egs = self.parse_egs_from_bill_text(text, bill_id=bill_id)
-                archive.archive_pdf(
+                saved = archive.archive_pdf(
                     row["pdfPath"],
                     bill_id,
                     egs=egs,
@@ -252,7 +252,8 @@ class DuquesneLightAnalyzer:
                     details=amount,
                     update_latest=False,
                 )
-                added += 1
+                if saved:  # not counted when the save failed (it's recorded and reported)
+                    added += 1
         if added:
             logger.info("Backfilled %d Duquesne bills into the bill archive", added)
         return added
