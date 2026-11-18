@@ -119,6 +119,8 @@ REFUSED_SAVE = "Not saving %s: it couldn't be read when loaded, and saving would
 # fixed, and the file itself is fine: moving it aside would throw its history away.
 UNREADABLE = "unreadable"
 WRITE_FAILED = "write failed"
+# Neither: a bug stopped the save (say, a value JSON can't encode). Not a disk problem.
+INTERNAL_ERROR = "internal error"
 
 # Files whose save was refused or failed since take_failed_saves() last ran, so a caller
 # that saves in many places (the notifier) can report them once, without checking each save.
@@ -131,12 +133,17 @@ def _refuse_save(path: Any) -> None:
 
 
 def _save_failed(path: Any, error: Exception) -> None:
-    logger.error("Could not save %s: %s", path, error)
-    _failed_saves[str(path)] = WRITE_FAILED
+    """Record a save that raised: an OSError is a failed write; anything else is a bug."""
+    if isinstance(error, OSError):
+        logger.error("Could not save %s: %s", path, error)
+        _failed_saves[str(path)] = WRITE_FAILED
+    else:
+        logger.exception("Could not save %s: internal error", path, exc_info=error)
+        _failed_saves[str(path)] = INTERNAL_ERROR
 
 
 def take_failed_saves() -> List[Tuple[str, str]]:
-    """(path, UNREADABLE or WRITE_FAILED) for saves that didn't happen since the last call; clears the list."""
+    """(path, cause) for saves that didn't happen since the last call; clears the list."""
     failed = sorted(_failed_saves.items())
     _failed_saves.clear()
     return failed
@@ -150,10 +157,15 @@ def save_failure_advice(path: str, cause: str) -> str:
             "was archived to it. Repair or restore it from a backup; moving it aside starts it "
             "again from what the utilities still have."
         )
+    if cause == WRITE_FAILED:
+        return (
+            f"Couldn't save {path}: writing it failed (disk full, permissions, or a read-only "
+            "mount?), so nothing new was archived to it. The file itself is intact: fix the disk "
+            "or permissions, and don't move the file aside, or its history goes with it."
+        )
     return (
-        f"Couldn't save {path}: writing it failed (disk full, permissions, or a read-only "
-        "mount?), so nothing new was archived to it. The file itself is intact: fix the disk "
-        "or permissions, and don't move the file aside, or its history goes with it."
+        f"Couldn't save {path}: an internal error (a bug) stopped the save, so nothing new was "
+        "archived to it. The file itself is intact; the log has the details. Please report it."
     )
 
 
@@ -440,7 +452,10 @@ class BillArchive:
             "bill_count": len(self._index),
             "last_updated": datetime.now().isoformat(timespec="seconds"),
         }
-        write_json_atomic(self.index_path, payload)
+        try:
+            write_json_atomic(self.index_path, payload)
+        except Exception as e:  # recorded, so the notifier reports it and the collector's run fails
+            _save_failed(self.index_path, e)
 
     def archive_pdf(
         self,
@@ -461,9 +476,9 @@ class BillArchive:
         """
         if not bill_id or not src_pdf or not os.path.exists(src_pdf):
             return None
+        dest = self.directory / f"{bill_id}.pdf"
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
-            dest = self.directory / f"{bill_id}.pdf"
             if not dest.exists():
                 shutil.copy2(src_pdf, dest)
                 logger.info("Archived bill PDF → %s", dest)
@@ -506,7 +521,9 @@ class BillArchive:
                     pass
             return str(dest)
         except Exception as e:
-            logger.warning("Could not archive bill PDF: %s", e)
+            # Recorded, not just logged: callers swallow this, and a bill that isn't archived
+            # (the only record of its supplier and supply rate) must still be reported.
+            _save_failed(dest, e)
             return None
 
     def known_ids(self) -> List[str]:

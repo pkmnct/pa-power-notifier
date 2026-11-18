@@ -262,9 +262,13 @@ integration that consumes it, `custom_components/duquesne_collector/` (see below
 - A run counts as a success only if hourly usage came back: when the hourly fetch
   returns nothing after requests failed, or after the archive had hourly data, the run
   is recorded as failed (`last_error.type` `hourly`), though daily usage and bills are
-  still saved. So is a run that couldn't save an archive file (`archive`): a file that
-  couldn't be read is never saved over, and that mustn't look like a success. Archive
-  writes are flushed to disk before the rename. `/status` also reports `first_started_at`, kept across restarts (an
+  still saved. So is a run that couldn't save an archive file (`archive`), whichever
+  file: the usage stores, the bill index or a bill PDF (whose callers swallow the error,
+  so failures are recorded in `usage_archive` and collected per run). The message fits
+  the cause: a file that couldn't be read (never saved over: repair or restore it), a
+  failed write (disk or permissions: the file is intact, don't move it aside), or an
+  internal error (a bug). The notifier's report uses the same wording. Archive writes
+  are flushed to disk before the rename. `/status` also reports `first_started_at`, kept across restarts (an
   upgraded collector that never succeeded gets 1970), and the daily schedule uses the
   local zone's offset for each run's own date, so it doesn't drift an hour across DST.
 - One image: the root `Dockerfile` gained a `collector` target. The default target is

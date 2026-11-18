@@ -390,11 +390,11 @@ class Collector:
         from energy_shopper_core.utilities import duquesne as core
         from usage_archive import (
             UNREADABLE,
-            WRITE_FAILED,
             BillArchive,
             DailyElectricUsageStore,
             HourlyUsageStore,
             save_failure_advice,
+            take_failed_saves,
         )
 
         analyzer = DuquesneLightAnalyzer()
@@ -408,12 +408,12 @@ class Collector:
         # saved over, so the run must fail loudly rather than look like a success while
         # nothing is archived and the utility drops the history day by day.
         unsaved: List[Tuple[str, str]] = []  # (path, cause), as usage_archive names causes
+        take_failed_saves()  # only this run's: the bill code records failures it then swallows
         with DATA_LOCK:
             store = HourlyUsageStore(hourly_path())
             had_hours = len(store) > 0
             run["hourly_added"] = store.merge(hourly)
-            if not store.save():
-                unsaved.append((store.path, UNREADABLE if store.load_failed else WRITE_FAILED))
+            store.save()  # a failure is recorded with its cause, collected below
         run["hourly_fetched"] = len(hourly)
         run["hourly_errors"] = client.last_hourly_errors
         # Nothing back, after requests failed or after we'd had hourly data before: the
@@ -432,8 +432,7 @@ class Collector:
             _write_json(analyzer.response_file, response)
             daily = DailyElectricUsageStore(daily_path())
             run["daily_added"] = daily.merge(rows)
-            if not daily.save():
-                unsaved.append((daily.path, UNREADABLE if daily.load_failed else WRITE_FAILED))
+            daily.save()
         run["daily_fetched"] = len(rows)
 
         if _truthy(os.getenv("COLLECTOR_BILLS"), True):
@@ -443,11 +442,18 @@ class Collector:
             bill_archive = BillArchive(bills_dir())
             run["bills_added"] = analyzer.backfill_bill_archive(bill_archive)
             if bill_archive.load_failed:
+                # Recorded only if this run tried to save the index; a run with no new
+                # bills doesn't, and the archive is still stuck.
                 unsaved.append((str(bill_archive.index_path), UNREADABLE))
             if egs is None:
                 run["warnings"].append(
                     "Latest bill: no EGS supply rate (download failed, or the bill is on default service)"
                 )
+        # Every save that didn't happen this run, with its cause (unreadable file, failed
+        # write, or an internal error): the stores, and the bill archive's index and PDF
+        # copies, whose callers catch the error.
+        listed = {path for path, _ in unsaved}
+        unsaved += [(path, cause) for path, cause in take_failed_saves() if path not in listed]
         logger.info("Collector run finished: %s", {k: v for k, v in run.items() if k != "warnings"})
         if unsaved:
             # The advice depends on the cause: moving a file aside is right for one that

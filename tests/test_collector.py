@@ -272,6 +272,70 @@ class CollectorTests(unittest.TestCase):
         self.assertIn("writing it failed", message)
         self.assertNotIn("moving it aside starts", message)
 
+    def test_run_fails_when_the_bill_index_cant_be_written(self):
+        """The bill code swallows the error; the run must still fail, with the right advice."""
+        from unittest import mock
+
+        import duquesne_light_analyzer as dla
+        import usage_archive
+        from energy_shopper_core.tou import HourlyUsageRecord
+
+        src = os.path.join(self.tmp.name, "downloaded.pdf")
+        with open(src, "wb") as f:
+            f.write(b"%PDF-1.4 test")
+
+        class FakeClient:
+            last_hourly_errors = 0
+
+            def ensure_authenticated(self):
+                pass
+
+            def fetch_hourly_history(self, lookback):
+                return [HourlyUsageRecord(dt="2026-11-02T00:00:00-05:00", kwh=1.0, cost=0.2)]
+
+            def fetch_daily_response(self):
+                return {}
+
+        class FakeAnalyzer:
+            def __init__(self):
+                self.client = FakeClient()
+                self.response_file = os.path.join(os.environ["DATA_DIR"], "duquesne_response.json")
+
+            def fetch_current_egs_from_bill(self):
+                try:  # as the real analyzer does: archive, and swallow a failure
+                    usage_archive.BillArchive().archive_pdf(src, "B1", bill_date="2026-11-01")
+                except Exception:
+                    pass
+                return None
+
+            def backfill_bill_archive(self, archive):
+                return 0
+
+        real_write = usage_archive.write_text_atomic
+
+        def index_unwritable(path, text):
+            if str(path).endswith(os.path.join("bills", "index.json")):
+                raise OSError(13, "Permission denied")
+            return real_write(path, text)
+
+        os.environ.update(DATA_DIR=self.tmp.name, COLLECTOR_BILLS="1")
+        original = dla.DuquesneLightAnalyzer
+        dla.DuquesneLightAnalyzer = FakeAnalyzer
+        try:
+            with mock.patch.object(usage_archive, "write_text_atomic", side_effect=index_unwritable):
+                collector = col.Collector()
+                self.assertFalse(collector.run_once())
+            status = collector.status()
+        finally:
+            dla.DuquesneLightAnalyzer = original
+            os.environ.pop("DATA_DIR", None)
+            os.environ.pop("COLLECTOR_BILLS", None)
+        message = status["last_error"]["message"]
+        self.assertEqual(status["last_error"]["type"], "archive")
+        self.assertIn("index.json", message)
+        self.assertIn("writing it failed", message)
+        self.assertIsNone(status["last_success"])
+
     def test_generated_token_is_never_logged(self):
         os.environ["DATA_DIR"] = self.tmp.name
         os.environ.pop("COLLECTOR_API_TOKEN", None)

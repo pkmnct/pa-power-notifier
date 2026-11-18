@@ -137,6 +137,48 @@ class ArchiveTests(unittest.TestCase):
         self.assertNotIn("moving it aside starts", error.message)  # that advice is for unreadable files
         self.assertIn("don't move the file aside", error.message)
 
+    def test_bill_archive_write_failures_are_recorded(self):
+        """The bill index and PDF copies: callers swallow the error, so it must be recorded."""
+        from unittest import mock
+
+        import usage_archive
+        from usage_archive import WRITE_FAILED, take_failed_saves
+
+        take_failed_saves()
+        src = os.path.join(self.dir, "bill.pdf")
+        with open(src, "wb") as f:
+            f.write(b"%PDF-1.4 test")
+        bills = os.path.join(self.dir, "bills")
+        archive = BillArchive(bills)
+        with mock.patch.object(usage_archive, "write_text_atomic", side_effect=OSError(13, "Permission denied")):
+            with self.assertLogs("usage_archive", level="ERROR"):
+                archive.archive_pdf(src, "B1", bill_date="2026-11-01", update_latest=False)
+        self.assertEqual(take_failed_saves(), [(os.path.join(bills, "index.json"), WRITE_FAILED)])
+
+        with mock.patch.object(usage_archive.shutil, "copy2", side_effect=OSError(28, "No space left on device")):
+            with self.assertLogs("usage_archive", level="ERROR"):
+                self.assertIsNone(archive.archive_pdf(src, "B2", update_latest=False))
+        self.assertEqual(take_failed_saves(), [(os.path.join(bills, "B2.pdf"), WRITE_FAILED)])
+
+    def test_a_bug_is_not_reported_as_a_disk_problem(self):
+        from unittest import mock
+
+        import usage_archive
+        from usage_archive import INTERNAL_ERROR, save_failure_advice, take_failed_saves
+
+        take_failed_saves()
+        path = os.path.join(self.dir, "hourly_usage.json")
+        store = HourlyUsageStore(path)
+        store.merge([HourlyUsageRecord(dt="2026-11-02T00:00:00-05:00", kwh=1.0, cost=0.0)])
+        with mock.patch.object(usage_archive, "write_json_atomic", side_effect=TypeError("Decimal is not JSON serializable")):
+            with self.assertLogs("usage_archive", level="ERROR"):
+                self.assertIs(store.save(), False)
+        ((failed_path, cause),) = take_failed_saves()
+        self.assertEqual((failed_path, cause), (path, INTERNAL_ERROR))
+        advice = save_failure_advice(failed_path, cause)
+        self.assertIn("internal error", advice)
+        self.assertNotIn("disk full", advice)
+
     def test_write_is_flushed_to_disk_before_the_rename(self):
         """Otherwise a power cut soon after a save can leave the renamed file empty."""
         import usage_archive
