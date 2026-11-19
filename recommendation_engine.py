@@ -324,22 +324,7 @@ def write_snapshot_file(path: str, data: Dict[str, Any], readable: bool) -> None
 
 
 def load_snapshot_file(path: str) -> Dict[str, Any]:
-    if not path or not os.path.exists(path):
-        return {"latest": {}, "history": []}
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            raise ValueError("not a JSON object")
-    except Exception as e:
-        logger.warning("Error loading previous rates: %s", e)
-        return {"latest": {}, "history": []}
-    if "history" in data:
-        return data
-    return {
-        "latest": data,
-        "history": [{"timestamp": data.get("timestamp", ""), "electric": {}, "gas": {}}],
-    }
+    return read_snapshot_file(path)[0]
 
 
 def save_snapshot(
