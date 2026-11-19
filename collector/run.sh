@@ -31,6 +31,8 @@ mapping = {
     "download_bills": "COLLECTOR_BILLS",
     "hourly_lookback_days": "HOURLY_LOOKBACK_DAYS",
     "log_level": "LOG_LEVEL",
+    "browser_mode": "DUQUESNE_BROWSER_MODE",
+    "user_agent": "DUQUESNE_PUPPETEER_USER_AGENT",
 }
 for key, env in mapping.items():
     value = opts.get(key)

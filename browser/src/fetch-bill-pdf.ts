@@ -12,7 +12,7 @@
  *   for --skip-ids.
  */
 import * as fs from "node:fs";
-import puppeteer from "puppeteer";
+import { launchBrowser, newPreparedPage } from "./launch.js";
 
 type CookieRow = {
   name: string;
@@ -57,13 +57,6 @@ function aspNetDate(v?: string): string | null {
   return m ? new Date(Number(m[1])).toISOString().slice(0, 10) : null;
 }
 
-function parseHeadless(): boolean | "shell" {
-  const v = process.env.DUQUESNE_PUPPETEER_HEADLESS?.trim().toLowerCase();
-  if (v === "0" || v === "false" || v === "no") return false;
-  if (v === "shell") return "shell";
-  return true;
-}
-
 async function main(): Promise<void> {
   const { cookiesFile, outPdf, billId: billIdArg, all, outDir, skipIds } = parseArgs();
   if (!cookiesFile || (all ? !outDir : !outPdf)) {
@@ -79,29 +72,10 @@ async function main(): Promise<void> {
     throw new Error("cookies-file must contain a JSON array");
   }
 
-  const browser = await puppeteer.launch({
-    headless: parseHeadless(),
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      // Docker's default 64MB /dev/shm is too small for Chromium.
-      "--disable-dev-shm-usage",
-      "--disable-blink-features=AutomationControlled",
-    ],
-  });
+  const browser = await launchBrowser();
 
   try {
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 800 });
-    const ua =
-      process.env.DUQUESNE_PUPPETEER_USER_AGENT?.trim() ||
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-    await page.setUserAgent(ua);
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, "webdriver", {
-        get: () => undefined,
-      });
-    });
+    const page = await newPreparedPage(browser);
 
     for (const c of cookies) {
       const domain =
