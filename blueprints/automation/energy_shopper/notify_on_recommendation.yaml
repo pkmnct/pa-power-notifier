@@ -1,0 +1,55 @@
+blueprint:
+  name: Energy Shopper — notify when switching supplier pays
+  description: >
+    Sends a notification when an Energy Shopper recommendation (gas or electric) changes,
+    for example when a supplier or Time-of-Use becomes cheaper than your current rate by
+    your threshold.
+  domain: automation
+  source_url: https://github.com/pkmnct/pa-power-notifier/blob/main/blueprints/automation/energy_shopper/notify_on_recommendation.yaml
+  input:
+    notify_action:
+      name: Notify action
+      description: The notify action to call, such as notify.mobile_app_your_phone.
+      default: notify.notify
+      selector:
+        text: {}
+    fuels:
+      name: Fuels
+      default: [gas, electric]
+      selector:
+        select:
+          multiple: true
+          options: [gas, electric]
+    include_stay:
+      name: Also notify when it goes back to "stay"
+      default: false
+      selector:
+        boolean: {}
+
+triggers:
+  - trigger: event
+    event_type: energy_shopper_recommendation_changed
+
+variables:
+  include_stay: !input include_stay
+  fuels: !input fuels
+  e: "{{ trigger.event.data }}"
+  fuel: "{{ e.fuel | default('gas') }}"
+
+conditions:
+  - condition: template
+    value_template: "{{ fuel in fuels and (e.recommendation == 'switch' or include_stay) }}"
+
+actions:
+  - action: !input notify_action
+    data:
+      title: >-
+        {% if e.recommendation != 'switch' %}{{ fuel | capitalize }}: stay on your current rate{% elif e.get('time_of_use') %}Electric: Time-of-Use would save{% else %}Cheaper {{ fuel }}: {{ e.supplier }}{% endif %}
+      message: >-
+        {% if e.recommendation == 'switch' %}
+        {{ e.supplier }} {% if e.get('time_of_use') %}{{ e.plan_type }}{% else %}({{ e.plan_type }}, {{ e.term }}){% endif %} is ${{ '%.4f' % e.price }}/{{ e.unit }}
+        vs your ${{ '%.4f' % e.current_price }}/{{ e.unit }}, about ${{ '%.0f' % e.annual_savings }}/yr
+        ({{ '%.0f' % e.savings_pct }}%) less.{% if e.phone %} Call {{ e.phone }}.{% endif %}
+        {% else %}
+        No offer beats your current rate by your threshold any more.
+        {% endif %}

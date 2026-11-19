@@ -1,0 +1,36 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    name: Core and notifier (stdlib)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"  # what the Docker image runs
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+
+  home-assistant:
+    name: Home Assistant (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [peoples_gas, energy_shopper, duquesne_collector]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # Pinned to the version the suites were written against (Home Assistant 2026.2.3).
+      - run: pip install pytest-homeassistant-custom-component==0.13.316 beautifulsoup4 pdfplumber
+      - run: pytest -q
+        working-directory: tests/${{ matrix.suite }}

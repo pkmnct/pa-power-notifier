@@ -22,11 +22,13 @@ import shutil
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 from env_bootstrap import data_dir
+from energy_shopper_core.tou import HourlyUsageRecord
+from energy_shopper_core.utilities.peoples_gas import GasUsageData
 
 
 def _default_data_path(name: str) -> str:
@@ -65,12 +67,125 @@ class DailyUsageRecord:
     effective_rate: float = 0.0
 
 
+def write_text_atomic(path: Any, text: str) -> None:
+    """
+    Write a file through a temp file and an atomic rename, so a reader (the collector API,
+    or the notifier and collector sharing data/) sees the old file or the new one, never
+    half of one. The temp name is per process, so two writers can't collide on it.
+
+    The data is flushed to disk before the rename, and the rename after it: otherwise a
+    power cut soon after a save can leave the renamed file empty on filesystems that
+    delay writing data, and an archive file that can't be read is never saved over.
+    """
+    path = str(path)
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    _fsync_directory(directory)
+
+
+def _fsync_directory(directory: str) -> None:
+    """Make a rename in `directory` durable. Best effort: not every platform allows it."""
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def write_json_atomic(path: Any, data: Any) -> None:
+    """JSON through write_text_atomic (same layout as json.dump with indent=2)."""
+    write_text_atomic(path, json.dumps(data, indent=2))
+
+
+REFUSED_SAVE = "Not saving %s: it couldn't be read when loaded, and saving would replace the history in it"
+
+# Why a save didn't happen. The remedies differ: an unreadable file needs repairing or
+# restoring; a failed write (disk full, permissions, a read-only mount) needs the disk
+# fixed, and the file itself is fine: moving it aside would throw its history away.
+UNREADABLE = "unreadable"
+WRITE_FAILED = "write failed"
+# Neither: a bug stopped the save (say, a value JSON can't encode). Not a disk problem.
+INTERNAL_ERROR = "internal error"
+
+# Files whose save was refused or failed since take_failed_saves() last ran, so a caller
+# that saves in many places (the notifier) can report them once, without checking each save.
+_failed_saves: Dict[str, str] = {}
+
+
+def _refuse_save(path: Any) -> None:
+    logger.error(REFUSED_SAVE, path)
+    _failed_saves[str(path)] = UNREADABLE
+
+
+def _save_failed(path: Any, error: Exception) -> None:
+    """Record a save that raised: an OSError is a failed write; anything else is a bug."""
+    if isinstance(error, OSError):
+        logger.error("Could not save %s: %s", path, error)
+        _failed_saves[str(path)] = WRITE_FAILED
+    else:
+        logger.exception("Could not save %s: internal error", path, exc_info=error)
+        _failed_saves[str(path)] = INTERNAL_ERROR
+
+
+def refuse_save(path: Any) -> None:
+    """Record (and log) that `path` wasn't saved because it couldn't be read: for writers outside this module."""
+    _refuse_save(path)
+
+
+def record_save_failure(path: Any, error: Exception) -> None:
+    """Record (and log) a save of `path` that raised, by cause: for writers outside this module."""
+    _save_failed(path, error)
+
+
+def take_failed_saves() -> List[Tuple[str, str]]:
+    """(path, cause) for saves that didn't happen since the last call; clears the list."""
+    failed = sorted(_failed_saves.items())
+    _failed_saves.clear()
+    return failed
+
+
+def save_failure_advice(path: str, cause: str) -> str:
+    """What to tell the user about a save that didn't happen, by cause."""
+    if cause == UNREADABLE:
+        return (
+            f"Couldn't save {path}: it couldn't be read, so it isn't saved over and nothing new "
+            "was archived to it. Repair or restore it from a backup; moving it aside starts it "
+            "again from what the utilities still have."
+        )
+    if cause == WRITE_FAILED:
+        return (
+            f"Couldn't save {path}: writing it failed (disk full, permissions, or a read-only "
+            "mount?), so nothing new was archived to it. The file itself is intact: fix the disk "
+            "or permissions, and don't move the file aside, or its history goes with it."
+        )
+    return (
+        f"Couldn't save {path}: an internal error (a bug) stopped the save, so nothing new was "
+        "archived to it. The file itself is intact; the log has the details. Please report it."
+    )
+
+
 class DailyElectricUsageStore:
     """Accumulate Duquesne daily kWh/cost, keyed by date."""
 
     def __init__(self, path: Optional[str] = None):
         self.path = path or daily_usage_path()
         self._records: Dict[str, dict] = {}
+        self._load_failed = False
         self._load()
 
     def _load(self) -> None:
@@ -88,7 +203,8 @@ class DailyElectricUsageStore:
                 data.get("latest", "?"),
             )
         except Exception as e:
-            logger.warning("Could not load daily usage store %s: %s", self.path, e)
+            self._load_failed = True
+            logger.error("Could not load daily usage store %s (%s); it won't be saved over", self.path, e)
 
     def merge(self, records: Iterable[Any]) -> int:
         """
@@ -138,11 +254,19 @@ class DailyElectricUsageStore:
             )
         return added
 
-    def save(self) -> None:
+    @property
+    def load_failed(self) -> bool:
+        """The file exists but couldn't be read, so this store won't save over it."""
+        return self._load_failed
+
+    def save(self) -> bool:
+        """Save the merged records. False when it refused (see load_failed) or failed."""
+        if self._load_failed:
+            _refuse_save(self.path)  # never replace a file we couldn't read
+            return False
         if not self._records:
-            return
+            return True
         try:
-            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
             dates = sorted(self._records.keys())
             data = {
                 "records": [self._records[d] for d in dates],
@@ -151,11 +275,12 @@ class DailyElectricUsageStore:
                 "latest": dates[-1],
                 "last_updated": datetime.now().isoformat(timespec="seconds"),
             }
-            with open(self.path, "w") as f:
-                json.dump(data, f, indent=2)
+            write_json_atomic(self.path, data)
             logger.info("Saved %d daily electric records to %s", len(self._records), self.path)
+            return True
         except Exception as e:
-            logger.error("Could not save daily usage store: %s", e)
+            _save_failed(self.path, e)
+            return False
 
     def all_records(self) -> List[DailyUsageRecord]:
         return [DailyUsageRecord(**self._records[d]) for d in sorted(self._records.keys())]
@@ -170,6 +295,7 @@ class GasUsageStore:
     def __init__(self, path: Optional[str] = None):
         self.path = path or gas_usage_path()
         self._records: Dict[str, dict] = {}
+        self._load_failed = False
         self._load()
 
     @staticmethod
@@ -199,7 +325,8 @@ class GasUsageStore:
                 self.path,
             )
         except Exception as e:
-            logger.warning("Could not load gas usage store %s: %s", self.path, e)
+            self._load_failed = True
+            logger.error("Could not load gas usage store %s (%s); it won't be saved over", self.path, e)
 
     def merge(self, records: Iterable[Any]) -> int:
         added = 0
@@ -241,11 +368,19 @@ class GasUsageStore:
             )
         return added
 
-    def save(self) -> None:
+    @property
+    def load_failed(self) -> bool:
+        """The file exists but couldn't be read, so this store won't save over it."""
+        return self._load_failed
+
+    def save(self) -> bool:
+        """Save the merged records. False when it refused (see load_failed) or failed."""
+        if self._load_failed:
+            _refuse_save(self.path)  # never replace a file we couldn't read
+            return False
         if not self._records:
-            return
+            return True
         try:
-            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
             rows = sorted(
                 self._records.values(),
                 key=lambda r: (r.get("year", 0), r.get("month", 0), r.get("to_date") or ""),
@@ -255,19 +390,15 @@ class GasUsageStore:
                 "record_count": len(rows),
                 "last_updated": datetime.now().isoformat(timespec="seconds"),
             }
-            with open(self.path, "w") as f:
-                json.dump(data, f, indent=2)
+            write_json_atomic(self.path, data)
             logger.info("Saved %d gas usage cycles to %s", len(rows), self.path)
+            return True
         except Exception as e:
-            logger.error("Could not save gas usage store: %s", e)
+            _save_failed(self.path, e)
+            return False
 
     def all_records_as_gas_usage_data(self) -> List[Any]:
-        """Return archived rows as peoples_gas_analyzer.GasUsageData when available."""
-        try:
-            from peoples_gas_analyzer import GasUsageData
-        except ImportError:
-            return list(self._records.values())
-
+        """Return archived rows as GasUsageData."""
         out: List[Any] = []
         for r in sorted(
             self._records.values(),
@@ -299,6 +430,7 @@ class BillArchive:
         self.directory = Path(directory or bill_archive_dir())
         self.index_path = self.directory / "index.json"
         self._index: Dict[str, dict] = {}
+        self._load_failed = False
         self._load()
 
     def _load(self) -> None:
@@ -313,16 +445,30 @@ class BillArchive:
                 if entry.get("pdf"):
                     entry["pdf"] = Path(entry["pdf"]).name
         except Exception as e:
-            logger.warning("Could not load bill archive index: %s", e)
+            self._load_failed = True
+            logger.error("Could not load bill archive index %s (%s); it won't be saved over", self.index_path, e)
 
-    def _save_index(self) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True)
+    @property
+    def load_failed(self) -> bool:
+        """The index exists but couldn't be read, so it won't be saved over."""
+        return self._load_failed
+
+    def _save_index(self) -> bool:
+        """Write the index. False when it refused (see load_failed) or the write failed (recorded)."""
+        if self._load_failed:
+            _refuse_save(self.index_path)  # it lists bills we don't
+            return False
         payload = {
             "bills": self._index,
             "bill_count": len(self._index),
             "last_updated": datetime.now().isoformat(timespec="seconds"),
         }
-        self.index_path.write_text(json.dumps(payload, indent=2))
+        try:
+            write_json_atomic(self.index_path, payload)
+            return True
+        except Exception as e:  # recorded, so the notifier reports it and the collector's run fails
+            _save_failed(self.index_path, e)
+            return False
 
     def archive_pdf(
         self,
@@ -343,9 +489,9 @@ class BillArchive:
         """
         if not bill_id or not src_pdf or not os.path.exists(src_pdf):
             return None
+        dest = self.directory / f"{bill_id}.pdf"
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
-            dest = self.directory / f"{bill_id}.pdf"
             if not dest.exists():
                 shutil.copy2(src_pdf, dest)
                 logger.info("Archived bill PDF → %s", dest)
@@ -378,7 +524,11 @@ class BillArchive:
             if bill_date and not entry.get("bill_date"):
                 entry["bill_date"] = bill_date
             self._index[bill_id] = entry
-            self._save_index()
+            if not self._save_index():
+                # The PDF is there, but its supplier, rate and date live in the index: the
+                # bill isn't archived until that's saved (a backfill mustn't count it, and
+                # the next run, reloading the old index, tries it again).
+                return None
             if update_latest:
                 # Also keep a convenience pointer to the newest PDF
                 latest = self.directory / "latest_bill.pdf"
@@ -388,11 +538,17 @@ class BillArchive:
                     pass
             return str(dest)
         except Exception as e:
-            logger.warning("Could not archive bill PDF: %s", e)
+            # Recorded, not just logged: callers swallow this, and a bill that isn't archived
+            # (the only record of its supplier and supply rate) must still be reported.
+            _save_failed(dest, e)
             return None
 
     def known_ids(self) -> List[str]:
         return sorted(self._index)
+
+    def entries(self) -> List[dict]:
+        """Copies of every index entry, oldest bill date first (undated bills first)."""
+        return [dict(self._index[k]) for k in sorted(self._index, key=lambda k: (self._index[k].get("bill_date") or "", k))]
 
     def fill_bill_meta(self, bill_id: str, bill_date: str, details: Optional[dict] = None) -> None:
         """Fill in a bill's date and details (from the bill history) where not recorded yet."""
@@ -487,13 +643,13 @@ class MarketArchive:
         if not csv_text:
             return None
         day = day or datetime.now().date().isoformat()
+        dest = self.directory / utility / f"{day}.csv"
         try:
-            dest = self.directory / utility / f"{day}.csv"
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(csv_text)
+            # Atomic: a run killed mid-write mustn't leave the day's only snapshot truncated.
+            write_text_atomic(dest, csv_text)
             return str(dest)
-        except Exception as e:
-            logger.warning("Could not archive %s offers CSV: %s", utility, e)
+        except Exception as e:  # recorded, so the notifier's report says so
+            _save_failed(dest, e)
             return None
 
     def log_price_to_compare(
@@ -501,17 +657,123 @@ class MarketArchive:
     ) -> None:
         day = day or datetime.now().date().isoformat()
         path = self.directory / "price_to_compare.jsonl"
+        rows = []
         try:
-            rows = []
             if path.is_file():
                 rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+            if not all(isinstance(r, dict) for r in rows):
+                raise ValueError("a line isn't a Price to Compare record")
+        except (OSError, ValueError):
+            # A history that can't be read isn't saved over: rewriting it from the lines that
+            # parse would drop the rest. Recorded, so the report says so (and how to fix it).
+            _refuse_save(path)
+            return
+        try:
             rows = [r for r in rows if not (r.get("date") == day and r.get("utility") == utility)]
             rows.append({"date": day, "utility": utility, "price": price, "unit": unit, "source": source})
             rows.sort(key=lambda r: (r.get("date", ""), r.get("utility", "")))
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            write_text_atomic(path, "".join(json.dumps(r) + "\n" for r in rows))
+        except Exception as e:  # recorded, so the notifier's report says so
+            _save_failed(path, e)
+
+
+# ---------------------------------------------------------------------------
+# Hourly usage persistence
+# ---------------------------------------------------------------------------
+
+class HourlyUsageStore:
+    """
+    Persistent store for hourly usage records.
+
+    Records are keyed by their ISO datetime string. Merging new data never
+    overwrites existing records, so historical data accumulates over time
+    even as the API's rolling window advances.
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        self._records: Dict[str, dict] = {}
+        self._load_failed = False
+        self._load()
+
+    def _load(self):
+        if not os.path.exists(self.path):
+            return
+        try:
+            with open(self.path) as f:
+                data = json.load(f)
+            self._records = {r['dt']: r for r in data.get('records', [])}
+            logger.info(
+                "Loaded %d hourly records from %s (range: %s to %s)",
+                len(self._records), self.path,
+                data.get('earliest', '?'), data.get('latest', '?'),
+            )
         except Exception as e:
-            logger.warning("Could not log %s Price to Compare: %s", utility, e)
+            self._load_failed = True
+            logger.error("Could not load hourly usage store %s (%s); it won't be saved over", self.path, e)
+
+    def merge(self, records: List[HourlyUsageRecord]) -> int:
+        """
+        Merge new records without deleting history.
+
+        Existing hours keep their first-seen kWh. If an existing hour had
+        cost=0 and the new fetch has cost>0, fill in the cost (utilities
+        often backfill $ after the kWh read).
+        Returns the count of genuinely new records added.
+        """
+        added = 0
+        filled = 0
+        for r in records:
+            if r.dt not in self._records:
+                self._records[r.dt] = asdict(r)
+                added += 1
+            else:
+                existing = self._records[r.dt]
+                if (existing.get("cost") or 0) <= 0 and (r.cost or 0) > 0:
+                    existing["cost"] = float(r.cost)
+                    filled += 1
+        if added or filled:
+            logger.info(
+                "Merged %d new hourly records, filled cost on %d (%d total)",
+                added,
+                filled,
+                len(self._records),
+            )
+        return added
+
+    @property
+    def load_failed(self) -> bool:
+        """The file exists but couldn't be read, so this store won't save over it."""
+        return self._load_failed
+
+    def save(self) -> bool:
+        """Save the merged records. False when it refused (see load_failed) or failed."""
+        if self._load_failed:
+            _refuse_save(self.path)  # never replace a file we couldn't read
+            return False
+        if not self._records:
+            return True
+        try:
+            sorted_dts = sorted(self._records.keys())
+            data = {
+                'records': [self._records[dt] for dt in sorted_dts],
+                'record_count': len(self._records),
+                'earliest': sorted_dts[0],
+                'latest': sorted_dts[-1],
+                'last_updated': datetime.now().isoformat(),
+            }
+            write_json_atomic(self.path, data)
+            logger.info("Saved %d hourly records to %s", len(self._records), self.path)
+            return True
+        except Exception as e:
+            _save_failed(self.path, e)
+            return False
+
+    def all_records(self) -> List[HourlyUsageRecord]:
+        return [HourlyUsageRecord(**r) for r in self._records.values()]
+
+    def __len__(self) -> int:
+        return len(self._records)
 
 
 def save_report(text: str, html: str, directory: Optional[str] = None) -> Optional[str]:

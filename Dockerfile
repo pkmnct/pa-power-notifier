@@ -9,7 +9,7 @@ COPY browser/tsconfig.json ./
 COPY browser/src src
 RUN npx tsc -p . && npm prune --omit=dev
 
-FROM python:3.11-slim
+FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 
@@ -32,14 +32,29 @@ COPY --from=browser-build /browser/node_modules browser/node_modules
 COPY --from=browser-build /browser/dist browser/dist
 
 COPY *.py ./
+COPY energy_shopper_core energy_shopper_core
 
 # Run as an unprivileged user. Chromium still runs with --no-sandbox: its own sandbox
 # needs kernel features Docker's default seccomp profile blocks, and the container is
 # the isolation boundary. On Linux hosts, make ./data writable by uid 1000 (or set
 # `user:` in compose); Docker Desktop on macOS maps ownership automatically.
 RUN useradd --create-home --uid 1000 app && mkdir -p /data && chown app /data
-USER app
 
 VOLUME /data
 
+# Duquesne collector (docker build --target collector): the API + daily fetch, for
+# Docker Compose and the Home Assistant add-on. It starts as root only so run.sh can
+# read the add-on's /data/options.json and hand /data to uid 1000, then drops to it.
+FROM runtime AS collector
+COPY collector/collector.py collector/run.sh collector/
+RUN chmod +x collector/run.sh
+LABEL io.hass.type="addon"
+EXPOSE 8765
+HEALTHCHECK --interval=60s --timeout=5s --start-period=20s \
+    CMD python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health' % (os.environ.get('COLLECTOR_PORT') or 8765), timeout=4)"
+ENTRYPOINT ["/app/collector/run.sh"]
+
+# Standalone notifier — the default target, last so `docker build .` builds it.
+FROM runtime AS notifier
+USER app
 CMD ["python", "pa_power_notifier.py"]

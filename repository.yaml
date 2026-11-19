@@ -1,0 +1,6 @@
+# Home Assistant add-on repository: add this repo's URL under
+# Settings → Add-ons → Add-on Store → ⋮ → Repositories. Add-ons live in subfolders
+# with a config.yaml (currently collector/).
+name: PA Energy Shopper add-ons
+url: https://github.com/pkmnct/pa-power-notifier
+maintainer: pkmnct

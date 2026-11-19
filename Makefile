@@ -1,4 +1,4 @@
-.PHONY: build run run-once venv browser-install gas-plan-check electric-plan-check test clean help
+.PHONY: build run run-once venv browser-install gas-plan-check electric-plan-check test unit-test clean help
 
 help:
 	@echo "PA Power & Gas Rate Notifier"
@@ -11,6 +11,7 @@ help:
 	@echo "  make gas-plan-check     - Peoples Gas forecast + PA Gas Switch plans (needs credentials)"
 	@echo "  make electric-plan-check - PA Power Switch plans ranked by your usage (see script header)"
 	@echo "  make test               - Run notifier once locally (uses .venv)"
+	@echo "  make unit-test          - Offline unit tests for energy_shopper_core"
 	@echo "  make clean              - Remove build artifacts (never touches data/)"
 
 build:
@@ -44,7 +45,23 @@ test:
 	.venv/bin/pip install -q -r requirements.txt
 	CHECK_INTERVAL_HOURS=0 .venv/bin/python pa_power_notifier.py
 
+unit-test:
+	@test -d .venv || python3 -m venv .venv
+	.venv/bin/python -m unittest discover -s tests -v
+
 # data/ holds merge-only history (usage, bills, market snapshots) that utilities drop
 # over time — it is deliberately not cleaned.
 clean:
-	rm -rf __pycache__ browser/dist
+	rm -rf __pycache__ energy_shopper_core/__pycache__ energy_shopper_core/markets/__pycache__ tests/__pycache__ browser/dist
+
+# ── Duquesne collector (collector/README.md) ──────────────────────────────────
+.PHONY: collector-build collector-up collector-serve
+
+collector-build:
+	docker build --target collector -t duquesne-collector .
+
+collector-up:
+	docker compose --profile collector up -d duquesne-collector
+
+collector-serve:
+	.venv/bin/python collector/collector.py

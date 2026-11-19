@@ -5,23 +5,31 @@ Runs on a configurable interval; alerts via email when lower rates are available
 """
 
 import os
-import csv
 import json
-import re
 import smtplib
 import time
-import requests
 import logging
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Dict, List, Optional, Tuple
-from io import StringIO
-from dataclasses import dataclass, asdict
+from dataclasses import asdict
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse, unquote_plus
 
+from energy_shopper_core.gas import GAS_PRICE_UNITS
+from energy_shopper_core.markets.pa import (
+    PaGasSwitch,
+    PaPowerSwitch,
+    only_service_type,
+    parse_electric_shop_results_url,
+    parse_offers_csv,
+    scrape_pagasswitch_price_to_compare,
+)
+from energy_shopper_core.models import Rate
+from energy_shopper_core.tou import TOUAnalyzer, TOURates
 from env_bootstrap import data_dir
+from gas_usage_forecast import therms_per_mcf, usd_per_mcf_to_usd_per_therm
+from usage_archive import HourlyUsageStore
 
 
 def _default_data_file(name: str) -> str:
@@ -40,30 +48,15 @@ except ImportError:
     PeoplesGasAnalyzer = None  # type: ignore
 
 try:
-    from gas_usage_forecast import GAS_PRICE_UNITS, therms_per_mcf, usd_per_mcf_to_usd_per_therm
-except ImportError:
-    GAS_PRICE_UNITS = ("mcf", "ccf", "therm")  # type: ignore
-    therms_per_mcf = None  # type: ignore
-    usd_per_mcf_to_usd_per_therm = None  # type: ignore
-
-try:
     from rate_scrapers import (
         scrape_duquesne_light_ptc,
-        scrape_pagasswitch_price_to_compare,
         scrape_peoples_gas_rate,
         scrape_duquesne_tou_rates,
     )
 except ImportError:
     scrape_duquesne_light_ptc = None  # type: ignore
-    scrape_pagasswitch_price_to_compare = None  # type: ignore
     scrape_peoples_gas_rate = None  # type: ignore
     scrape_duquesne_tou_rates = None  # type: ignore
-
-try:
-    from tou_analyzer import HourlyUsageStore, TOUAnalyzer
-except ImportError:
-    HourlyUsageStore = None  # type: ignore
-    TOUAnalyzer = None  # type: ignore
 
 try:
     from env_bootstrap import configure_logging_from_env
@@ -75,119 +68,6 @@ except ImportError:
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
 logger = logging.getLogger(__name__)
-
-
-def parse_electric_shop_results_url(url: str) -> Dict[str, str]:
-    """
-    Map PA Power Switch "shop for rates results" query string to ShopApi RateCSV params.
-
-    Example:
-      ...?zipcode=15xxx&serviceType=residential&distributor=1180
-          &distributorrate=RS+-+Regular+Residential+Service
-    → id=1180, servicetype=residential, ratetype=RS - Regular Residential Service,
-      zipcode=15xxx
-    """
-    url = (url or "").strip()
-    if not url:
-        return {}
-    parsed = urlparse(url)
-    q = parse_qs(parsed.query, keep_blank_values=False)
-
-    def first(key: str) -> Optional[str]:
-        vals = q.get(key)
-        if not vals or not str(vals[0]).strip():
-            return None
-        return unquote_plus(str(vals[0]).strip())
-
-    out: Dict[str, str] = {}
-    z = first("zipcode")
-    if z:
-        out["zipcode"] = z
-    st = first("serviceType")
-    if st:
-        out["servicetype"] = st
-    dist = first("distributor")
-    if dist:
-        out["id"] = dist
-    dr = first("distributorrate")
-    if dr:
-        out["ratetype"] = dr
-    return out
-
-
-@dataclass
-class Rate:
-    """Represents a utility rate from the PA Power/Gas Switch CSV."""
-    price: str
-    supplier: str
-    type: str
-    cancellation_fee: str
-    deposit_required: str
-    discounts_incentives: str
-    introductory_price: str
-    monthly_fee: str
-    more_info: str
-    service_type: str
-    term_end_date: str
-    term_length: str
-    utility_type: str  # 'electric' or 'gas'
-    new_customers_offer: str = ''  # CSV "New Customers Offer": Yes = new customers only
-    # Electric-only CSV columns (PA Gas Switch has no renewable data)
-    renewable: str = ''  # "Renewable Energy": Yes / No
-    pa_wind: str = ''  # "PA wind": Yes / No
-    phone: str = ''  # "Contact Phone Number"
-
-    def get_numeric_price(self) -> Optional[float]:
-        try:
-            price_str = self.price.replace('$', '').replace(',', '').strip()
-            parts = price_str.split()
-            if parts:
-                return float(parts[0])
-        except (ValueError, AttributeError):
-            pass
-        return None
-
-    def get_numeric_monthly_fee(self) -> float:
-        """Parse Monthly Fee column to dollars per month (0 if none / unknown)."""
-        s = (self.monthly_fee or '').strip()
-        if not s or s.lower() in ('none', 'n/a', '$0', '0', 'no'):
-            return 0.0
-        try:
-            cleaned = s.replace('$', '').replace(',', '').strip()
-            parts = cleaned.split()
-            if parts:
-                fee = float(parts[0])
-                # e.g. "$1 per day"
-                return fee * 30.4 if 'day' in cleaned.lower() else fee
-        except (ValueError, AttributeError):
-            pass
-        return 0.0
-
-    def has_cancellation_fee(self) -> bool:
-        val = self.cancellation_fee.strip().lower()
-        return val not in ('', 'none', 'no', '$0', '0', 'n/a')
-
-    def renewable_tier(self) -> str:
-        """'100%', 'partial' or 'none' from the electric CSV; '' when not reported (gas)."""
-        flag = (self.renewable or '').strip().lower()
-        if flag == 'yes':
-            # "100%" counts only where it describes this plan, not an upsell like
-            # "Interested in upgrading to 100% green energy for an additional 3 cents?"
-            for sentence in re.split(r'(?<=[.!?])\s+', self.more_info or ''):
-                if re.search(r'100\s*%', sentence) and not re.search(r'upgrad|additional', sentence, re.I):
-                    return '100%'
-            return 'partial'
-        if flag == 'no':
-            return 'partial' if (self.pa_wind or '').strip().lower() == 'yes' else 'none'
-        return ''
-
-    def is_renewable(self) -> bool:
-        tier = self.renewable_tier()
-        if tier:
-            return tier != 'none'
-        keywords = ('green', 'renewable', 'solar', 'wind', 'clean')
-        searchable = (self.type + self.supplier + self.discounts_incentives).lower()
-        return any(k in searchable for k in keywords)
 
 
 def _email_state_path():
@@ -447,7 +327,7 @@ class RateChecker:
         return None
 
     def get_current_gas_rate(self) -> float:
-        if PeoplesGasAnalyzer is not None and usd_per_mcf_to_usd_per_therm is not None:
+        if PeoplesGasAnalyzer is not None:
             try:
                 analyzer = PeoplesGasAnalyzer()
                 results = analyzer.run_analysis()
@@ -495,7 +375,7 @@ class RateChecker:
         directly. price is None when neither the shop page nor GAS_PRICE_TO_COMPARE
         provides one; unit then falls back to GAS_PRICE_UNIT, or "" if that's unset too.
         """
-        if scrape_pagasswitch_price_to_compare is not None and self.gas_zipcode:
+        if self.gas_zipcode:
             try:
                 got = scrape_pagasswitch_price_to_compare(self.gas_id, self.gas_zipcode)
                 if got and got[0] > 0:
@@ -514,8 +394,6 @@ class RateChecker:
         against per-kWh price when ranking offers. Uses the persisted hourly
         usage store (no extra network call) when available.
         """
-        if HourlyUsageStore is None:
-            return None
         try:
             store = HourlyUsageStore(self.hourly_usage_file)
         except Exception as e:
@@ -540,9 +418,6 @@ class RateChecker:
         analysis already fetched by get_current_gas_rate() when available, to
         avoid a duplicate network round-trip to People's Gas.
         """
-        if therms_per_mcf is None:
-            return None
-
         analysis_dict = getattr(self, '_last_gas_analysis', None)
         if analysis_dict is None and PeoplesGasAnalyzer is not None:
             try:
@@ -571,20 +446,16 @@ class RateChecker:
             )
             return []
         try:
-            params = {
-                "id": self.electric_id,
-                "servicetype": self.electric_service_type,
-                "ratetype": self.electric_rate_type,
-            }
-            if self.electric_zipcode:
-                params["zipcode"] = self.electric_zipcode
-            logger.info("Fetching electric rates: %s", params)
-            resp = requests.get(self.electric_api_url, params=params, timeout=30)
-            resp.raise_for_status()
-            rates = self._only_service_type(
-                self._parse_csv(resp.text, 'electric'), self.electric_service_type
+            market = PaPowerSwitch(
+                self.electric_id,
+                self.electric_rate_type,
+                service_type=self.electric_service_type,
+                zipcode=self.electric_zipcode,
             )
-            self.last_offers_csv['electric'] = resp.text
+            logger.info("Fetching electric rates: %s", market.params())
+            listing = market.fetch_offers()
+            rates = listing.offers
+            self.last_offers_csv['electric'] = listing.raw
 
             if self.include_duquesne_as_option:
                 ptc = self._cached_ptc()
@@ -617,60 +488,22 @@ class RateChecker:
             logger.error("Set GAS_ID — the distributor id in your pagasswitch.com shop URL")
             return []
         try:
-            params = {'id': self.gas_id, 'servicetype': self.gas_service_type}
-            logger.info("Fetching gas rates: %s", params)
-            resp = requests.get(self.gas_api_url, params=params, timeout=30)
-            resp.raise_for_status()
-            rates = self._only_service_type(self._parse_csv(resp.text, 'gas'), self.gas_service_type)
-            self.last_offers_csv['gas'] = resp.text
-            logger.info("Fetched %d gas rates", len(rates))
-            return rates
+            market = PaGasSwitch(self.gas_id, service_type=self.gas_service_type)
+            logger.info("Fetching gas rates: %s", market.params())
+            listing = market.fetch_offers()
+            self.last_offers_csv['gas'] = listing.raw
+            logger.info("Fetched %d gas rates", len(listing.offers))
+            return listing.offers
         except Exception as e:
             logger.error("Error fetching gas rates: %s", e)
             return []
 
     @staticmethod
     def _only_service_type(rates: List[Rate], service_type: str) -> List[Rate]:
-        """RateCSV mixes in other service types (e.g. Commercial on a residential query)."""
-        wanted = (service_type or '').strip().lower()
-        if not wanted:
-            return rates
-        kept = [r for r in rates if (r.service_type or '').strip().lower() in ('', wanted)]
-        if len(kept) < len(rates):
-            logger.info(
-                "Dropped %d %s offers whose Service Type is not %r",
-                len(rates) - len(kept),
-                rates[0].utility_type,
-                service_type,
-            )
-        return kept
+        return only_service_type(rates, service_type)
 
     def _parse_csv(self, text: str, utility_type: str) -> List[Rate]:
-        reader = csv.DictReader(StringIO(text))
-        return [
-            Rate(
-                price=row.get('Price', ''),
-                supplier=row.get('Supplier', ''),
-                type=row.get('Type', ''),
-                cancellation_fee=row.get('Cancellation Fee', ''),
-                deposit_required=row.get('Deposit Required', ''),
-                # Electric and gas CSVs name these columns differently
-                discounts_incentives=row.get('Discounts/Incentives Available')
-                or row.get('Discounts available?', ''),
-                introductory_price=row.get('Introductory price') or row.get('Introductory price?', ''),
-                monthly_fee=row.get('Monthly Fee') or row.get('Monthly service fee amount', ''),
-                more_info=row.get('More info', ''),
-                service_type=row.get('Service Type', ''),
-                term_end_date=row.get('Term End Date', ''),
-                term_length=row.get('Term Length', ''),
-                utility_type=utility_type,
-                new_customers_offer=row.get('New Customers Offer', ''),
-                renewable=row.get('Renewable Energy', ''),
-                pa_wind=row.get('PA wind', ''),
-                phone=row.get('Contact Phone Number', ''),
-            )
-            for row in reader
-        ]
+        return parse_offers_csv(text, utility_type)
 
     # ------------------------------------------------------------------
     # Filtering & ranking
@@ -815,20 +648,16 @@ class RateChecker:
 
     def save_rates(self, electric_rates: List[Rate], gas_rates: List[Rate]):
         """Persist latest CSV dump. History is appended by recommendation_engine.save_snapshot."""
-        try:
-            from recommendation_engine import load_snapshot_file
-            os.makedirs(os.path.dirname(self.storage_file) or '.', exist_ok=True)
-            existing = load_snapshot_file(self.storage_file)
-            existing["latest"] = {
-                'electric': [asdict(r) for r in electric_rates],
-                'gas': [asdict(r) for r in gas_rates],
-                'timestamp': datetime.now().isoformat(),
-            }
-            existing.setdefault("history", [])
-            with open(self.storage_file, 'w') as f:
-                json.dump(existing, f, indent=2)
-        except Exception as e:
-            logger.error("Error saving rates: %s", e)
+        from recommendation_engine import read_snapshot_file, write_snapshot_file
+
+        existing, readable = read_snapshot_file(self.storage_file)
+        existing["latest"] = {
+            'electric': [asdict(r) for r in electric_rates],
+            'gas': [asdict(r) for r in gas_rates],
+            'timestamp': datetime.now().isoformat(),
+        }
+        existing.setdefault("history", [])
+        write_snapshot_file(self.storage_file, existing, readable)
 
     # ------------------------------------------------------------------
     # Notifications
@@ -906,7 +735,9 @@ class RateChecker:
                 server.login(self.smtp_username, self.smtp_password)
                 server.send_message(msg)
             logger.info("Email sent to %s", self.notify_to)
-            _record_email_state(report)
+            # No _record_email_state here: that fingerprints the report for EMAIL_MODE=change,
+            # and this legacy email has no report (the call raised NameError after sending,
+            # which logged a sent email as "Failed to send email").
         except Exception as e:
             logger.error("Failed to send email: %s", e)
 
@@ -921,8 +752,6 @@ class RateChecker:
           2. Manual env var overrides (TOU_PEAK_RATE, TOU_OFF_PEAK_RATE, etc.).
           3. None — TOU analysis is skipped.
         """
-        from tou_analyzer import TOURates
-
         # Try PDF scraper / cache
         if scrape_duquesne_tou_rates is not None:
             try:
@@ -966,10 +795,6 @@ class RateChecker:
 
         Returns a formatted report string, or None if analysis could not run.
         """
-        if HourlyUsageStore is None or TOUAnalyzer is None:
-            logger.debug("tou_analyzer module not available; skipping TOU analysis")
-            return None
-
         tou_rates = self._get_tou_rates(current_electric_rate)
         if tou_rates is None:
             logger.info(
@@ -1024,7 +849,12 @@ class RateChecker:
         self._last_egs_bill = None
         self._last_electric_analysis = None
         self._last_gas_analysis = None
+        from recommendation_engine import report_failed_saves
+        from usage_archive import take_failed_saves
+
+        take_failed_saves()  # only this run's
         report = build_check_report(self)
+        report_failed_saves(report)
         text = report.format_text()
         print("\n" + "=" * 72)
         print(text)

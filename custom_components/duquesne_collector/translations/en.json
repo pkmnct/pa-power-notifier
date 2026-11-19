@@ -1,0 +1,90 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Duquesne Light collector",
+        "description": "The collector fetches your Duquesne Light usage and bills once a day (it needs a headless browser, so it runs as an add-on or container) and serves them on your network. Point this at its API.",
+        "data": {
+          "url": "Collector URL",
+          "api_token": "API token"
+        },
+        "data_description": {
+          "url": "The add-on listens on port 8765: http://localhost:8765 on Home Assistant OS, or http://HOST:8765 (the collector machine's address) for a Docker Compose collector elsewhere.",
+          "api_token": "The token set with the add-on's api_token option (required there). Under Docker Compose, COLLECTOR_API_TOKEN, or, if that's empty, the token saved in data/collector_api_token on the host."
+        }
+      },
+      "reconfigure": {
+        "title": "Duquesne Light collector",
+        "description": "Change where the collector is or its token. Usage history carries on.",
+        "data": {
+          "url": "Collector URL",
+          "api_token": "API token"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Duquesne Light collector",
+        "description": "The collector at {url} rejected the API token. Enter the token now set on the add-on (api_token) or COLLECTOR_API_TOKEN, or leave it blank if you removed it.",
+        "data": {
+          "api_token": "API token"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Couldn't reach the collector at that URL.",
+      "invalid_auth": "The collector rejected this token.",
+      "not_collector": "Something answered at that URL, but it isn't a Duquesne collector.",
+      "unknown": "Unexpected error.",
+      "token_required": "This collector requires an API token. Set your own with the add-on's api_token option (COLLECTOR_API_TOKEN for Docker Compose) and enter the same value here. Under Compose, the generated one is in data/collector_api_token on the host."
+    },
+    "abort": {
+      "already_configured": "This collector is already set up.",
+      "reconfigure_successful": "Saved.",
+      "reauth_successful": "Saved."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "supplier": {
+        "name": "Electric supplier"
+      },
+      "supply_rate": {
+        "name": "Electric supply rate"
+      },
+      "price_to_compare": {
+        "name": "Electric Price to Compare"
+      },
+      "last_bill_amount": {
+        "name": "Last bill amount"
+      },
+      "last_bill_date": {
+        "name": "Last bill date"
+      },
+      "last_bill_usage": {
+        "name": "Last bill usage"
+      },
+      "last_bill_supply_charges": {
+        "name": "Last bill supply charges"
+      },
+      "last_success": {
+        "name": "Collector last success"
+      },
+      "usage_through": {
+        "name": "Usage data through"
+      }
+    }
+  },
+  "issues": {
+    "collector_stale": {
+      "title": "Duquesne collector hasn't fetched since {last_success}",
+      "description": "The collector at {url} normally fetches usage and bills every day, but its last successful run was {last_success}. Last error: {error}.\n\nCheck the add-on (or container) log. If Duquesne Light changed its site, the collector may need an update."
+    },
+    "collector_auth": {
+      "title": "Duquesne collector can't log in to Duquesne Light",
+      "description": "The collector at {url} reports: {message}.\n\nFix the username and password in the add-on's configuration (or DUQUESNE_USERNAME / DUQUESNE_PASSWORD for Compose) and restart it."
+    },
+    "collector_unreachable": {
+      "title": "Duquesne collector unreachable",
+      "description": "Home Assistant hasn't been able to reach the collector at {url} since {since}. Check that the add-on or container is running, or reconfigure the integration if its address changed."
+    }
+  }
+}
