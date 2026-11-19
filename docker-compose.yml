@@ -61,8 +61,8 @@ services:
       # Headless Chromium (bundled in the image) for Incapsula-blocked Duquesne pages
       - DUQUESNE_USE_PUPPETEER=${DUQUESNE_USE_PUPPETEER:-1}
       - DUQUESNE_PUPPETEER_TIMEOUT=${DUQUESNE_PUPPETEER_TIMEOUT:-}
-      # auto (default): a windowed Chrome on a virtual display (Xvfb, in the image); window or headless to force
-      - DUQUESNE_PUPPETEER_HEADLESS=${DUQUESNE_PUPPETEER_HEADLESS:-}
+      # auto (default): a windowed Chrome on a virtual display (Xvfb, in the image); window, headless or shell to force
+      - DUQUESNE_BROWSER_MODE=${DUQUESNE_BROWSER_MODE:-}
       - DUQUESNE_PUPPETEER_USER_AGENT=${DUQUESNE_PUPPETEER_USER_AGENT:-}
 
       # ── Notification settings ───────────────────────────────────────────────

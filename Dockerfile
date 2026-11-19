@@ -18,7 +18,7 @@ WORKDIR /app
 # which has no linux-arm64 build. Xvfb gives Chromium a virtual display: a windowed
 # browser passes bot walls more often than headless Chrome.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends nodejs chromium xvfb xauth \
+    && apt-get install -y --no-install-recommends nodejs chromium xvfb \
     && rm -rf /var/lib/apt/lists/*
 ENV PUPPETEER_SKIP_DOWNLOAD=true \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
