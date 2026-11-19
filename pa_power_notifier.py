@@ -648,20 +648,16 @@ class RateChecker:
 
     def save_rates(self, electric_rates: List[Rate], gas_rates: List[Rate]):
         """Persist latest CSV dump. History is appended by recommendation_engine.save_snapshot."""
-        try:
-            from recommendation_engine import load_snapshot_file
-            os.makedirs(os.path.dirname(self.storage_file) or '.', exist_ok=True)
-            existing = load_snapshot_file(self.storage_file)
-            existing["latest"] = {
-                'electric': [asdict(r) for r in electric_rates],
-                'gas': [asdict(r) for r in gas_rates],
-                'timestamp': datetime.now().isoformat(),
-            }
-            existing.setdefault("history", [])
-            with open(self.storage_file, 'w') as f:
-                json.dump(existing, f, indent=2)
-        except Exception as e:
-            logger.error("Error saving rates: %s", e)
+        from recommendation_engine import read_snapshot_file, write_snapshot_file
+
+        existing, readable = read_snapshot_file(self.storage_file)
+        existing["latest"] = {
+            'electric': [asdict(r) for r in electric_rates],
+            'gas': [asdict(r) for r in gas_rates],
+            'timestamp': datetime.now().isoformat(),
+        }
+        existing.setdefault("history", [])
+        write_snapshot_file(self.storage_file, existing, readable)
 
     # ------------------------------------------------------------------
     # Notifications

@@ -13,7 +13,7 @@ import json
 import logging
 import os
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from energy_shopper_core.alerts import own_rate_alert, trend_note
 from energy_shopper_core.eligibility import prior_suppliers
@@ -285,12 +285,52 @@ def _snapshot_payload(electric: Optional[UtilitySection], gas: Optional[UtilityS
     }
 
 
+def read_snapshot_file(path: str) -> Tuple[Dict[str, Any], bool]:
+    """
+    (snapshot, readable). A missing file is an empty snapshot and readable; one that
+    exists but can't be parsed is empty and not readable, so it isn't saved over (its
+    market trend history would be lost).
+    """
+    empty: Dict[str, Any] = {"latest": {}, "history": []}
+    if not path or not os.path.exists(path):
+        return empty, True
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("not a JSON object")
+    except Exception as e:
+        logger.warning("Error loading previous rates: %s", e)
+        return empty, False
+    if "history" in data:
+        return data, True
+    return {
+        "latest": data,
+        "history": [{"timestamp": data.get("timestamp", ""), "electric": {}, "gas": {}}],
+    }, True
+
+
+def write_snapshot_file(path: str, data: Dict[str, Any], readable: bool) -> None:
+    """Save the snapshot atomically; refuse (and record it) when the file couldn't be read."""
+    from usage_archive import record_save_failure, refuse_save, write_json_atomic
+
+    if not readable:
+        refuse_save(path)
+        return
+    try:
+        write_json_atomic(path, data)
+    except Exception as e:
+        record_save_failure(path, e)
+
+
 def load_snapshot_file(path: str) -> Dict[str, Any]:
     if not path or not os.path.exists(path):
         return {"latest": {}, "history": []}
     try:
         with open(path) as f:
             data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("not a JSON object")
     except Exception as e:
         logger.warning("Error loading previous rates: %s", e)
         return {"latest": {}, "history": []}
@@ -311,7 +351,7 @@ def save_snapshot(
 ) -> None:
     from dataclasses import asdict
 
-    data = load_snapshot_file(path)
+    data, readable = read_snapshot_file(path)
     history = list(data.get("history") or [])
     history.append(_snapshot_payload(electric, gas))
     history = history[-HISTORY_CAP:]
@@ -320,12 +360,7 @@ def save_snapshot(
         "gas": [asdict(r) for r in gas_rates],
         "timestamp": datetime.now().isoformat(timespec="seconds"),
     }
-    try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w") as f:
-            json.dump({"latest": latest, "history": history}, f, indent=2)
-    except Exception as e:
-        logger.error("Error saving rates: %s", e)
+    write_snapshot_file(path, {"latest": latest, "history": history}, readable)
 
 
 def _electric_supplier_history(checker: Any, report: CheckReport) -> List[dict]:
@@ -365,8 +400,12 @@ def _rate_alert_is_new(utility: str, bill_id: str) -> bool:
         return False
     seen[utility] = bill_id
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(seen, indent=2))
+        # Atomic: a half-written file would read as empty and re-send every known alert.
+        # (Saved over even when unreadable: it holds no history, and refusing would re-send
+        # the same alert every run.)
+        from usage_archive import write_json_atomic
+
+        write_json_atomic(path, seen)
     except Exception as e:
         logger.warning("Could not record rate alert: %s", e)
     return True

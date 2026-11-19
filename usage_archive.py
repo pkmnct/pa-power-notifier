@@ -142,6 +142,16 @@ def _save_failed(path: Any, error: Exception) -> None:
         _failed_saves[str(path)] = INTERNAL_ERROR
 
 
+def refuse_save(path: Any) -> None:
+    """Record (and log) that `path` wasn't saved because it couldn't be read: for writers outside this module."""
+    _refuse_save(path)
+
+
+def record_save_failure(path: Any, error: Exception) -> None:
+    """Record (and log) a save of `path` that raised, by cause: for writers outside this module."""
+    _save_failed(path, error)
+
+
 def take_failed_saves() -> List[Tuple[str, str]]:
     """(path, cause) for saves that didn't happen since the last call; clears the list."""
     failed = sorted(_failed_saves.items())
@@ -651,6 +661,8 @@ class MarketArchive:
         try:
             if path.is_file():
                 rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+            if not all(isinstance(r, dict) for r in rows):
+                raise ValueError("a line isn't a Price to Compare record")
         except (OSError, ValueError):
             # A history that can't be read isn't saved over: rewriting it from the lines that
             # parse would drop the rest. Recorded, so the report says so (and how to fix it).
