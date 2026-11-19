@@ -1,7 +1,7 @@
 # Home Assistant add-on: Duquesne Light collector.
 # The image is the root Dockerfile's `collector` target (see collector/README.md).
 name: Duquesne Light collector
-version: "0.1.0"
+version: "0.1.1"
 slug: duquesne_collector
 description: >-
   Fetches Duquesne Light usage and bill PDFs (supplier, supply rate) with headless
@@ -24,6 +24,7 @@ options:
   download_bills: true
   hourly_lookback_days: 400
   log_level: info
+  browser_mode: auto
 schema:
   username: str
   password: password
@@ -34,3 +35,7 @@ schema:
   download_bills: bool
   hourly_lookback_days: int(29,800)
   log_level: list(debug|info|warning|error)
+  # auto: a browser window on a virtual display (passes bot walls most often); headless as a fallback.
+  browser_mode: list(auto|window|headless)
+  # Only to override the browser's own user agent; normally leave empty.
+  user_agent: str?

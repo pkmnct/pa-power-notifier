@@ -10,11 +10,15 @@ Env (inherited by subprocess — set in shell or .env loaded by Python):
 
 Puppeteer-only (see browser/src/fetch-html.ts):
 
-  DUQUESNE_PUPPETEER_HEADLESS — 0 = visible Chrome window; shell/new = newer headless (default)
-  DUQUESNE_PUPPETEER_USER_AGENT — override Chromium default UA
+  DUQUESNE_PUPPETEER_HEADLESS — auto (default): a visible Chrome window under a virtual
+      display (xvfb-run) when one is installed and there is no real display, else headless.
+      0/false/no/window: always a visible window (virtual display if none). 1/true/yes/headless:
+      headless. shell: the legacy headless binary.
+  DUQUESNE_PUPPETEER_USER_AGENT — override the user agent. Default: the browser's own,
+      minus "HeadlessChrome", so it matches the platform it runs on.
 
-Plain Puppeteer does not guarantee bypassing Imperva; if still blocked, try headed mode
-(DUQUESNE_PUPPETEER_HEADLESS=0) or puppeteer-extra-plugin-stealth.
+Plain Puppeteer does not guarantee bypassing Imperva. A visible window (real or virtual)
+passes far more often than headless Chrome.
 """
 
 from __future__ import annotations
@@ -22,6 +26,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -56,6 +62,51 @@ def _session_cookies_for_puppeteer(session: "requests.Session", page_url: str) -
             }
         )
     return rows
+
+
+_HEADLESS_YES = {"1", "true", "yes", "on", "headless", "new", "shell"}
+_HEADED_YES = {"0", "false", "no", "off", "headed", "window"}
+_XVFB_ARGS = ["xvfb-run", "-a", "--server-args=-screen 0 1280x800x24"]
+
+
+def _browser_launch(environ=None, which=shutil.which):
+    """
+    (env, prefix) for running a browser script: the env overrides for the subprocess and
+    the command to put in front of it.
+
+    A visible Chrome window passes bot walls more often than headless Chrome, so unless
+    headless is asked for, a window is used: the real display if there is one, else a
+    virtual one (xvfb-run), when installed. With neither, headless.
+    """
+    environ = os.environ if environ is None else environ
+    mode = (environ.get("DUQUESNE_PUPPETEER_HEADLESS") or "").strip().lower()
+    if mode in _HEADLESS_YES:
+        return {}, []
+    wants_window = mode in _HEADED_YES
+    if environ.get("DISPLAY"):
+        return {"DUQUESNE_PUPPETEER_HEADLESS": "0"}, []
+    if which("xvfb-run"):
+        return {"DUQUESNE_PUPPETEER_HEADLESS": "0"}, list(_XVFB_ARGS)
+    if wants_window:
+        logger.warning(
+            "A visible browser window was requested but there is no display and xvfb-run "
+            "isn't installed: running headless"
+        )
+    return {"DUQUESNE_PUPPETEER_HEADLESS": "1"}, []
+
+
+def describe_challenge(html: str) -> str:
+    """What a blocked page was, for the log: its title and the start of its visible text."""
+    html = html or ""
+    if not html.strip():
+        return "empty page"
+    m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+    title = re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
+    text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    kind = "Incapsula" if ("_Incapsula_Resource" in html or "Incapsula" in html) else "unknown"
+    return f"{len(html)} bytes, title={title[:80]!r}, kind={kind}, text={text[:160]!r}"
 
 
 def _puppeteer_timeout() -> int:
@@ -113,16 +164,23 @@ def fetch_html_via_puppeteer(
             json.dump(cookies, tf)
             tmp_path = tf.name
 
+        launch_env, prefix = _browser_launch()
         cmd: List[str] = [
+            *prefix,
             *script,
             "--url",
             url,
             "--cookies-file",
             tmp_path,
         ]
-        logger.info("Fetching with Puppeteer (headless Chrome): %s", url)
+        logger.info(
+            "Fetching with Puppeteer (%s Chrome): %s",
+            "virtual-display" if prefix else ("headless" if launch_env.get("DUQUESNE_PUPPETEER_HEADLESS") != "0" else "windowed"),
+            url,
+        )
         proc = subprocess.run(
             cmd,
+            env={**os.environ, **launch_env},
             cwd=str(_BROWSER_DIR),
             capture_output=True,
             text=True,
@@ -135,8 +193,10 @@ def fetch_html_via_puppeteer(
         html = proc.stdout
         if html_looks_like_bot_challenge(html):
             logger.warning(
-                "Puppeteer still received a bot-challenge or empty page — "
-                "you may need to run non-headless once or check DUQUESNE credentials."
+                "Puppeteer still received a bot-challenge or empty page (%s). If this "
+                "repeats, your IP may be blocked; check DUQUESNE credentials, or set "
+                "DUQUESNE_PUPPETEER_HEADLESS / DUQUESNE_PUPPETEER_USER_AGENT.",
+                describe_challenge(html),
             )
         return html
     except subprocess.TimeoutExpired:
@@ -186,9 +246,11 @@ def _run_bill_script(session: "requests.Session", args: List[str], label: str) -
             json.dump(cookies, tf)
             tmp_path = tf.name
 
-        cmd: List[str] = [*script, "--cookies-file", tmp_path, *args]
+        launch_env, prefix = _browser_launch()
+        cmd: List[str] = [*prefix, *script, "--cookies-file", tmp_path, *args]
         proc = subprocess.run(
             cmd,
+            env={**os.environ, **launch_env},
             cwd=str(_BROWSER_DIR),
             capture_output=True,
             text=True,
