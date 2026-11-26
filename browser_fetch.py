@@ -10,17 +10,17 @@ Env (inherited by subprocess — set in shell or .env loaded by Python):
 
 Puppeteer-only (see browser/src/fetch-html.ts):
 
-  DUQUESNE_BROWSER_MODE — auto (default): a visible Chrome window, on the real display or a
-      virtual one (Xvfb) when there is none; headless if neither works. window: the same, but
-      warns when it has to fall back. headless: headless Chrome. shell: the legacy headless
-      binary. (DUQUESNE_PUPPETEER_HEADLESS is read as a fallback: 0/false/no = window,
+  DUQUESNE_BROWSER_MODE — auto (default) and headless: headless Chrome. window: a visible
+      Chrome window, on the real display or a virtual one (Xvfb) when there is none; falls
+      back to headless with a warning. shell: the legacy headless binary.
+      (DUQUESNE_PUPPETEER_HEADLESS is read as a fallback: 0/false/no = window,
       1/true/yes = headless.) The Node scripts only ever see DUQUESNE_PUPPETEER_HEADLESS = 0/1/shell,
       set here.
-  DUQUESNE_PUPPETEER_USER_AGENT — override the user agent. Default: the browser's own,
-      minus "HeadlessChrome", so it matches the platform it runs on.
+  DUQUESNE_PUPPETEER_USER_AGENT — override the user agent. Default: a macOS Chrome 131 string
+      (see browser/src/launch.ts).
 
-Plain Puppeteer does not guarantee bypassing Imperva. A visible window (real or virtual)
-passes far more often than headless Chrome.
+Plain Puppeteer does not guarantee bypassing Imperva. Headless with the default user agent
+passed on 2026-11-22; the windowed, platform-matching fingerprint of 0.1.1 did not.
 """
 
 from __future__ import annotations
@@ -140,9 +140,9 @@ def _browser_launch(
     start_display: Callable[[], Optional[str]] = _virtual_display,
 ) -> BrowserLaunch:
     """
-    How to run a browser script. A visible Chrome window passes bot walls more often than
-    headless Chrome, so unless headless is asked for, a window is used: the real display if
-    it works, else a shared virtual one (Xvfb), when installed. With neither, headless.
+    How to run a browser script. Headless Chrome by default. A visible window (mode window) uses
+    the real display if it works, else a shared virtual one (Xvfb), when installed; with
+    neither it falls back to headless.
     """
     environ = os.environ if environ is None else environ
     mode = (
@@ -150,7 +150,10 @@ def _browser_launch(
     ).strip().lower()
     if mode == "shell":
         return BrowserLaunch({"DUQUESNE_PUPPETEER_HEADLESS": "shell"}, "headless (shell)")
-    if mode in _HEADLESS_YES:
+    if mode not in _HEADED_YES:
+        # auto (the default), headless and anything unrecognised: the combination that got
+        # through Incapsula on 2026-11-22. The windowed fingerprint of 0.1.1 was blocked on
+        # every run after it, so a window is now opt-in.
         return BrowserLaunch({"DUQUESNE_PUPPETEER_HEADLESS": "1"}, "headless")
     display = environ.get("DISPLAY") or ""
     if display and _display_usable(display, exists):
@@ -158,11 +161,10 @@ def _browser_launch(
     virtual = start_display()
     if virtual:
         return BrowserLaunch({"DUQUESNE_PUPPETEER_HEADLESS": "0", "DISPLAY": virtual}, "virtual-display")
-    if mode in _HEADED_YES:
-        logger.warning(
-            "A visible browser window was requested but there is no usable display and Xvfb "
-            "isn't available: running headless"
-        )
+    logger.warning(
+        "A visible browser window was requested but there is no usable display and Xvfb "
+        "isn't available: running headless"
+    )
     return BrowserLaunch({"DUQUESNE_PUPPETEER_HEADLESS": "1"}, "headless")
 
 
