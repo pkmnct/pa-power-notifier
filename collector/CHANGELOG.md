@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2
+
+- Fixes the blocked fetches of 0.1.1: from 2026-11-23 every run got an Incapsula "Request
+  unsuccessful" page ("OPowerToken not found: ... bot-challenge page"). `browser_mode: auto` is
+  headless again and the default user agent is back to the macOS Chrome/131 string, the
+  combination that worked on 2026-11-22 (0.1.0). Confirmed on one run on 2026-11-24 by setting
+  those two options by hand. The windowed mode stays as `browser_mode: window`.
+
 ## 0.1.1
 
 - Browser fingerprint: the fetch browser now reports its own platform's user agent (no

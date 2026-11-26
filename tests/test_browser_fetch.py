@@ -27,10 +27,12 @@ HEADLESS = "DUQUESNE_PUPPETEER_HEADLESS"
 
 
 class BrowserLaunchTest(unittest.TestCase):
-    def test_default_uses_a_virtual_display_when_there_is_none(self):
-        launch = bf._browser_launch({}, no_socket, virtual)
-        self.assertEqual(launch.env, {HEADLESS: "0", "DISPLAY": ":99"})
-        self.assertEqual(launch.label, "virtual-display")
+    def test_default_is_headless_even_with_a_display_or_xvfb(self):
+        # 0.1.1 defaulted to a window and was blocked by Incapsula on every run.
+        for environ, exists, start in (({}, no_socket, virtual), ({"DISPLAY": ":0"}, has_socket, virtual)):
+            launch = bf._browser_launch(environ, exists, start)
+            self.assertEqual(launch.env, {HEADLESS: "1"})
+            self.assertEqual(launch.label, "headless")
 
     def test_auto_value_is_the_default(self):
         for var in ("DUQUESNE_BROWSER_MODE", HEADLESS):
@@ -39,17 +41,22 @@ class BrowserLaunchTest(unittest.TestCase):
                 bf._browser_launch({}, no_socket, virtual),
             )
 
-    def test_a_real_display_is_used_directly(self):
-        launch = bf._browser_launch({"DISPLAY": ":0"}, has_socket, no_virtual)
+    def test_window_mode_uses_a_real_display_directly(self):
+        launch = bf._browser_launch({"DUQUESNE_BROWSER_MODE": "window", "DISPLAY": ":0"}, has_socket, no_virtual)
         self.assertEqual(launch.env, {HEADLESS: "0"})
 
-    def test_a_stale_display_is_not_trusted(self):
-        launch = bf._browser_launch({"DISPLAY": ":0"}, no_socket, virtual)
-        self.assertEqual(launch.env["DISPLAY"], ":99")
+    def test_window_mode_does_not_trust_a_stale_display(self):
+        launch = bf._browser_launch({"DUQUESNE_BROWSER_MODE": "window", "DISPLAY": ":0"}, no_socket, virtual)
+        self.assertEqual(launch.env, {HEADLESS: "0", "DISPLAY": ":99"})
+        self.assertEqual(launch.label, "virtual-display")
 
-    def test_a_remote_display_is_trusted(self):
-        launch = bf._browser_launch({"DISPLAY": "host:0"}, no_socket, no_virtual)
+    def test_window_mode_trusts_a_remote_display(self):
+        launch = bf._browser_launch({"DUQUESNE_BROWSER_MODE": "window", "DISPLAY": "host:0"}, no_socket, no_virtual)
         self.assertEqual(launch.env, {HEADLESS: "0"})
+
+    def test_window_mode_uses_a_virtual_display_when_there_is_none(self):
+        launch = bf._browser_launch({"DUQUESNE_BROWSER_MODE": "window"}, no_socket, virtual)
+        self.assertEqual(launch.env, {HEADLESS: "0", "DISPLAY": ":99"})
 
     def test_headless_can_be_forced(self):
         for value in ("1", "true", "headless"):
@@ -61,18 +68,13 @@ class BrowserLaunchTest(unittest.TestCase):
         self.assertEqual(env, {HEADLESS: "shell"})
 
     def test_legacy_variable_is_still_read(self):
-        env = bf._browser_launch({HEADLESS: "true"}, has_socket, virtual).env
-        self.assertEqual(env, {HEADLESS: "1"})
+        self.assertEqual(bf._browser_launch({HEADLESS: "true"}, has_socket, virtual).env, {HEADLESS: "1"})
+        self.assertEqual(bf._browser_launch({HEADLESS: "0"}, no_socket, virtual).env[HEADLESS], "0")
 
-    def test_without_a_display_it_falls_back_to_headless(self):
-        launch = bf._browser_launch({}, no_socket, no_virtual)
-        self.assertEqual(launch.env, {HEADLESS: "1"})
+    def test_window_without_a_display_falls_back_to_headless_with_a_warning(self):
         with self.assertLogs(bf.logger, "WARNING"):
-            bf._browser_launch({"DUQUESNE_BROWSER_MODE": "window"}, no_socket, no_virtual)
-
-    def test_window_mode_asks_for_a_window(self):
-        env = bf._browser_launch({"DUQUESNE_BROWSER_MODE": "window"}, no_socket, virtual).env
-        self.assertEqual(env[HEADLESS], "0")
+            launch = bf._browser_launch({"DUQUESNE_BROWSER_MODE": "window"}, no_socket, no_virtual)
+        self.assertEqual(launch.env, {HEADLESS: "1"})
 
 
 class RunBrowserTest(unittest.TestCase):

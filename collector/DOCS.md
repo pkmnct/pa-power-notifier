@@ -31,8 +31,8 @@ Home Assistant itself can do neither.
 | `download_bills` | on | Download new bill PDFs (where the supplier and supply rate come from) |
 | `hourly_lookback_days` | `400` | How far back hourly usage is paged on each run |
 | `log_level` | `info` | |
-| `browser_mode` | `auto` | `auto` and `window` run Chromium as a normal window on a virtual display, which Duquesne's bot protection blocks least; `headless` is the fallback if that misbehaves |
-| `user_agent` | empty | Overrides the browser's user agent. Leave empty: the default matches the platform the browser really runs on |
+| `browser_mode` | `auto` | `auto` and `headless` run headless Chromium, which got through Duquesne's bot protection when the windowed mode of 0.1.1 did not; `window` runs a normal window on a virtual display if you want to try it |
+| `user_agent` | empty | Overrides the browser's user agent. Leave empty: the default is the macOS Chrome string that passed Duquesne's bot protection |
 
 The API listens on port 8765 inside the container. To use another host port, change
 it in the **Network** section, not in the options.

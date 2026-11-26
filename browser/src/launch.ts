@@ -1,13 +1,10 @@
 /**
  * Shared Chromium launch for the Duquesne fetch scripts.
  *
- * The browser should look like what it is: a consistent Chrome on this machine's own
- * platform. A hard-coded macOS user agent on a Linux container is a mismatch bot walls
- * (Imperva Incapsula) can detect, so the user agent is the browser's own with the
- * "HeadlessChrome" marker removed, unless DUQUESNE_PUPPETEER_USER_AGENT overrides it.
+ * The user agent is DEFAULT_USER_AGENT unless DUQUESNE_PUPPETEER_USER_AGENT overrides it.
  *
  * DUQUESNE_PUPPETEER_HEADLESS: 0/false/no = a visible window (browser_fetch.py sets this from
- * DUQUESNE_BROWSER_MODE and runs the window on a virtual display where there is none); shell = the legacy headless binary;
+ * DUQUESNE_BROWSER_MODE, only for mode window, on a virtual display where there is none); shell = the legacy headless binary;
  * anything else = headless.
  */
 import puppeteer, { type Browser, type Page } from "puppeteer";
@@ -66,11 +63,19 @@ function uaMetadata(ua: string) {
   };
 }
 
+/**
+ * Default user agent. Duquesne's bot protection (Imperva Incapsula) passed this string with
+ * headless Chrome on 2026-11-22 (0.1.0) and blocked every run of 0.1.1, which used the
+ * browser's own Linux user agent in a windowed Chrome. DUQUESNE_PUPPETEER_USER_AGENT overrides it.
+ */
+export const DEFAULT_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
 /** A page with a user agent (and client hints) that match the browser. */
 export async function newPreparedPage(browser: Browser): Promise<Page> {
   const page = await browser.newPage();
   const override = process.env.DUQUESNE_PUPPETEER_USER_AGENT?.trim();
-  const ua = override || (await browser.userAgent()).replace(/HeadlessChrome/g, "Chrome");
+  const ua = override || DEFAULT_USER_AGENT;
   await page.setUserAgent(ua, uaMetadata(ua));
   await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
   await page.evaluateOnNewDocument(() => {
